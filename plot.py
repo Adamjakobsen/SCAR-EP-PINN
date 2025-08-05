@@ -9,6 +9,8 @@ import numpy.ma as ma
 import seaborn as sns
 import os
 
+EXPERIMENT_GILS = np.linspace(0.01, 0.1, 19)
+
 
 def set_plot_env():
     """
@@ -175,12 +177,12 @@ def activation_map_GT(pinn, model, experiments, frame_4, experiment_path, filena
     plt.savefig(f"./results/{filename}", bbox_inches='tight')
     plt.close(fig)
 
-def activation_vertical_zoom( experiments,filename,zoom) -> None:
+def activation_vertical_zoom(experiments, filename, zoom) -> None:
 
     set_plot_env()
-    g_il_values = np.array([0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-                            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1])
-    g_il_vals = g_il_values
+    #g_il_values = np.array([0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
+    #                        0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1])
+    g_il_vals = EXPERIMENT_GILS
     indices_experiments = np.arange(len(g_il_values)-6, dtype=int)
     sampled_indices = indices_experiments[(
         indices_experiments + 1) % 4 != 0]
@@ -919,8 +921,6 @@ def activation_error_vertical( filename) -> None:
     activations_all_PINN = np.load("./data/activations_all_PINN.npy")
     print("VM shape", vm_all.shape)
     
-
-    
     x = vertices[:, 0]
     y = vertices[:, 1]
 
@@ -1065,15 +1065,12 @@ def plot_vm_errors(filename):
     plt.savefig(path, bbox_inches='tight')
 
 
-def plot_data(t_plot,experiments, filename, zoom) -> None:
-
-
+def plot_data(t_plot, gil_vals, filename, zoom) -> None:
     # Use the same g_il_values as in the original code
-    g_il_values = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04,
-                   0.045, 0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1]
-    g_il_vals = [0.01, 0.025, 0.03, 0.1]
-
-
+    #g_il_values = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04,
+    #               0.045, 0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1]
+    
+    expernums = [np.where(np.isclose(EXPERIMENT_GILS, gil))[0][0] for gil in gil_vals]
     vertices, triangles, _ = get_data()
     # scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
@@ -1081,8 +1078,6 @@ def plot_data(t_plot,experiments, filename, zoom) -> None:
 
     vm_all = np.load("./data/vm_variation_scar_full.npy")
     activation_FEM_all = np.load("./data/activations_all_FEM.npy")
-    
-
     
     x = vertices[:, 0]
     y = vertices[:, 1]
@@ -1103,14 +1098,16 @@ def plot_data(t_plot,experiments, filename, zoom) -> None:
         2, 4, figsize=(26, 12), sharex=True, sharey=True)
     axs = axs_grid.flatten()
     max_activation_time = np.nanmax(activation_FEM_all)
-    for i, experiment in enumerate(experiments):
+    
+    positions = range(len(gil_vals))
 
-        fem_activation_time = activation_FEM_all[:, experiment]
+    for i, expernum, gil in zip(positions, expernums, gil_vals):
+
+        fem_activation_time = activation_FEM_all[:, expernum]
 
         # Triangulate and mask invalid data for FEM and PINN
         triang = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
         triang_v = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
-
 
         fem_activation_time_masked = ma.masked_invalid(fem_activation_time)
 
@@ -1133,14 +1130,14 @@ def plot_data(t_plot,experiments, filename, zoom) -> None:
         # Plot
         ax_V = axs_grid[1, :].flatten()[i]
         # Plot Vm
-        v = vm_all[:, :, experiment]
+        v = vm_all[:, :, expernum]
         v = v[int(t_plot/5), :]
 
         V_plot = ax_V.tripcolor(
             triang_v, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis)
 
         ax_AT.set_title(
-            r'$\bf{g_{{il}}}$ = '+f'{g_il_vals[experiment]}' + r' S/m', fontsize=24, fontweight='bold')
+            r'$\bf{g_{{il}}}$ = '+f'{gil}' + r' S/m', fontsize=24, fontweight='bold')
         # aspect ratio
         ax_V.set_aspect('equal')
         ax_V.set_ylim(0, 76)
@@ -1277,11 +1274,13 @@ def plot_fem_zoom(t_plot,experiments, zoom, filename) -> None:
 
     
     fig.savefig(f"./results/{filename}", bbox_inches='tight')
+
 def data_split():
     # All g_il values
-    gil_all = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085,
-            0.09, 0.095, 0.1]
+    #gil_all = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
+    #           0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085,
+    #           0.09, 0.095, 0.1]
+    gil_all = EXPERIMENT_GILS
 
     # Evaluation data
     gil_evaluation_up_to_0_07 = [value for idx, value in enumerate(
@@ -1361,25 +1360,30 @@ def visualize_mesh(filename):
     plt.axis('off')
     
     plt.savefig(f"./results/{filename}", bbox_inches='tight')
-#Data split
-data_split()
-#Fig2: Data only
-experiments = [0, 1, 2, 3]
-zoom = [50, 75, 15, 50]
-t_plot = 430
-#plot_data(t_plot, experiments, "Fig2_a.pdf", zoom)
-#visualize_mesh("mesh.pdf")
-#plot_fem_zoom(t_plot, experiments, zoom, "Fig2_c.pdf")
+
+if __name__ == "__main__":
+    t_plot = 430
+    
+    #Data split
+    data_split()
+    #Fig2: Data only
+    #experiments = [0, 1, 2, 3]
+    zoom = [50, 75, 15, 50]
+    plot_data(t_plot,
+              [0.01, 0.02, 0.025, 0.1],
+             "Fig2_a.pdf",
+              zoom)
+    #visualize_mesh("mesh.pdf")
+    #plot_fem_zoom(t_plot, experiments, zoom, "Fig2_c.pdf")
 
 
-#plot_vm_errors()
-experiments =[18,3,2,0]
-zoom = [55, 75, 15, 45]
-t_plot = 430
-#plot_vm_errors("Fig3_b.pdf")
-#plot_vm_vertical(t_plot,experiments, "Fig3_a.pdf")
-#plot_vm_vertical_zoom(t_plot, experiments, "Fig5_a.pdf", zoom)
-#activation_vertical(experiments, "Fig4_a.pdf")
-#activation_error_vertical( "Fig4_b.pdf")
-#activation_vertical_zoom( experiments, "Fig5_b.pdf", zoom)
+    #plot_vm_errors()
+    experiments =[18, 3, 2, 0]
+    zoom = [55, 75, 15, 45]
+    #plot_vm_errors("Fig3_b.pdf")
+    #plot_vm_vertical(t_plot,experiments, "Fig3_a.pdf")
+    #plot_vm_vertical_zoom(t_plot, experiments, "Fig5_a.pdf", zoom)
+    #activation_vertical(experiments, "Fig4_a.pdf")
+    #activation_error_vertical( "Fig4_b.pdf")
+    #activation_vertical_zoom( experiments, "Fig5_b.pdf", zoom)
 
