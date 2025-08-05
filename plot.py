@@ -1134,7 +1134,7 @@ def plot_data(t_plot, gil_vals, filename, zoom) -> None:
         v = v[int(t_plot/5), :]
 
         V_plot = ax_V.tripcolor(
-            triang_v, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis)
+            triang_v, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis, rasterized = True)
 
         ax_AT.set_title(
             r'$\bf{g_{{il}}}$ = '+f'{gil}' + r' S/m', fontsize=24, fontweight='bold')
@@ -1371,7 +1371,7 @@ if __name__ == "__main__":
     zoom = [50, 75, 15, 50]
     plot_data(t_plot,
               [0.01, 0.02, 0.025, 0.1],
-             "Fig2_a.pdf",
+             "Fig2_a.svg",
               zoom)
     #visualize_mesh("mesh.pdf")
     #plot_fem_zoom(t_plot, experiments, zoom, "Fig2_c.pdf")
