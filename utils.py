@@ -26,11 +26,9 @@ def get_boundary():
         triangles = group2["topology"][:]
     return coordinates, triangles
 
-
 def load_config(config_path="config.json"):
     with open(config_path, "r") as f:
         return json.load(f)
-
 
 def make_directory(config):
     path_directory = config.get("path_directory", "./experiments/refactored_run")
