@@ -10,7 +10,25 @@ import seaborn as sns
 import os
 
 EXPERIMENT_GILS = np.linspace(0.01, 0.1, 19)
+DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06, 0.07, 0.075, 0.08],
+              "interpolation": [0.025, 0.045, 0.065],
+              "extrapolation": [0.085, 0.09, 0.095, 0.1]}
 
+def expernums_from_gils(gil_vals):
+    return [np.where(np.isclose(EXPERIMENT_GILS, gil))[0][0] for gil in gil_vals]
+
+def get_dataset_color(gil):
+    if np.isclose(gil, DATA_SPLIT["train"]).any():
+        return 'g', "Training"
+    elif np.isclose(gil, DATA_SPLIT["interpolation"]).any():
+        return 'b', "Interpolation"
+    elif np.isclose(gil, DATA_SPLIT["extrapolation"]).any():
+        return 'r', "Extrapolation"
+    else:
+        raise Exception(f"GIL {gil} not found in data split.")
+
+def get_gstr(gil):
+    return rf"$\mathbf{{g_{{il}}^s}}={gil:.3f}\,\mathbf{{S/m}}$"
 
 def set_plot_env():
     """
@@ -43,13 +61,30 @@ def set_plot_env():
     sns.set_theme(context=context, style="ticks",
                   palette="colorblind", font="sans-serif", font_scale=1)
 
+def add_cbar_to_plotgrids(fig, axs, pcm, label):
+    fig.subplots_adjust(
+        left=0.20,
+        right=0.88,
+        top=0.9,    # ⬅️ push the subplots down to 75% of the figure
+        bottom=0.1,
+        hspace=0.001,
+        wspace=0.15
+    )
+    # now add the horizontal colorbar *over* the space you freed up:
+    cb = fig.colorbar(
+        pcm,
+        ax=axs,
+        orientation='horizontal',
+        location='bottom',    # requires mpl ≥3.2
+        fraction=0.05,     # bar thickness
+        pad=0.07,          # small pad from the top of the subplot area
+        label=label, #r"$AT$ [ms]"
+    )
+
+    cb.ax.xaxis.set_ticks_position('bottom')
+    cb.ax.xaxis.set_label_position('bottom')
+
 def activation_map_GT(pinn, model, experiments, frame_4, experiment_path, filename) -> None:
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.tri as tri
-    import torch
-    import os
-    import numpy.ma as ma  # For masking NaN values
 
     # g_il_vals = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]
     # g_il_values = np.linspace(0, 9, 10)
@@ -83,7 +118,6 @@ def activation_map_GT(pinn, model, experiments, frame_4, experiment_path, filena
     activation_threshold = -40  # Define your activation threshold
 
     # Prepare boundary for plotting
-    from utils import get_boundary
     boundary, _ = get_boundary()
     boundary = boundary * 1e-3
     x_boundary = boundary[:, 0]
@@ -178,10 +212,7 @@ def activation_map_GT(pinn, model, experiments, frame_4, experiment_path, filena
     plt.close(fig)
 
 def activation_vertical_zoom(experiments, filename, zoom) -> None:
-
     set_plot_env()
-    #g_il_values = np.array([0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-    #                        0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1])
     g_il_vals = EXPERIMENT_GILS
     indices_experiments = np.arange(len(g_il_values)-6, dtype=int)
     sampled_indices = indices_experiments[(
@@ -191,9 +222,9 @@ def activation_vertical_zoom(experiments, filename, zoom) -> None:
     train_gil       = g_il_values[sampled_indices]
     interpolation_idx=np.array([3,7,11])
     interpolation_gil = g_il_values[interpolation_idx]
-    extra = False
-    long = False
-    isotropic = True
+    #extra = False
+    #long = False
+    #isotropic = True
     vertices, triangles, _ = get_data()
     #scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
@@ -204,12 +235,11 @@ def activation_vertical_zoom(experiments, filename, zoom) -> None:
     print("VM shape", vm_all.shape)
     conductivities_all = np.load(
         "./data/conductivities_variation_scar_full.npy")
+    
     activation_threshold = -40
-
 
     x = vertices[:, 0]
     y = vertices[:, 1]
-    from utils import get_boundary
     boundary, _ = get_boundary()
     boundary = boundary * 1e-3
     x_boundary = boundary[:, 0]
@@ -292,7 +322,7 @@ def activation_vertical_zoom(experiments, filename, zoom) -> None:
             txt_color = 'r'
 
         # bold, colored g_il text
-        g_str = rf"$\mathbf{{g_{{il}}={gil:.3f}\,\mathbf{{S/m}}}}$"
+        g_str = get_gstr(gil) # rf"$\mathbf{{g_{{il}}={gil:.3f}\,\mathbf{{S/m}}}}$"
         """
         ax.text(
             x=-0.40, y=0.5, s=g_str,
@@ -356,185 +386,10 @@ def activation_vertical_zoom(experiments, filename, zoom) -> None:
     plt.savefig(f"./results/{filename}",
                 dpi=300)
     plt.close(fig)
-def activation_vertical( experiments, filename) -> None:
-
-    set_plot_env()
-    g_il_values = np.array([0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-                            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1])
-    g_il_vals = g_il_values
-    indices_experiments = np.arange(len(g_il_values)-6, dtype=int)
-    sampled_indices = indices_experiments[(
-        indices_experiments + 1) % 4 != 0]
-    sampled_indices = sampled_indices[:12]
-    extrapolation_gil = g_il_values[-5:]
-    train_gil       = g_il_values[sampled_indices]
-    interpolation_idx=np.array([3,7,11])
-    interpolation_gil = g_il_values[interpolation_idx]
-    extra = False
-    long = False
-    isotropic = True
-    vertices, triangles, _ = get_data()
-    #scar_vertices = np.load("./data/gregion3_coordinates.npy")
-    vertices = vertices * 1e-3
-    #scar_vertices = scar_vertices * 1e-3
-    vm_all = np.load("./data/vm_variation_scar_full.npy")
-    activations_all_FEM = np.load("./data/activations_all_FEM.npy")
-    activations_all_PINN = np.load("./data/activations_all_PINN.npy")
-    print("Activation FEM shape", activations_all_FEM.shape)
-    print("Activation PINN shape", activations_all_PINN.shape)
-
-    
-    x = vertices[:, 0]
-    y = vertices[:, 1]
-    from utils import get_boundary
-    boundary, _ = get_boundary()
-    boundary = boundary * 1e-3
-    x_boundary = boundary[:, 0]
-    y_boundary = boundary[:, 1]
-
-    n_timepoints = vm_all.shape[0]
-    dt = 5
-    t_start = 0
-    t_end = (n_timepoints - 1) * dt
-    t = np.linspace(t_start, t_end, n_timepoints) / 12.9
-
-    n_exp = len(experiments)
-    fig, axs = plt.subplots(
-    nrows=n_exp, ncols=2,
-    figsize=(12, 5*n_exp),
-    sharex=True, sharey=True,
-    gridspec_kw={'hspace': 0.001})
-    triang = tri.Triangulation(vertices[:,0], vertices[:,1], triangles)
-    set_plot_env()
-    max_activation_time = np.nanmax(activations_all_FEM)
-    print("Max activation time:", max_activation_time)
-    
-    for i,exp_idx in enumerate(experiments):
-        print("exp_ind: ", exp_idx)
-        
-
-        pinn_activation_time = activations_all_PINN[:, exp_idx]
-        fem_activation_time = activations_all_FEM[:, exp_idx]
-
-        fem_activation_time_masked = ma.masked_invalid(fem_activation_time)
-        pinn_activation_time_masked = ma.masked_invalid(pinn_activation_time)
-        triang_pinn = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
-        triang_fem = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
-        tri_mask_fem = np.any(
-            np.isnan(fem_activation_time[triang.triangles]), axis=1)
-        tri_mask_pinn = np.any(
-            np.isnan(pinn_activation_time[triang.triangles]), axis=1)
-        triang_pinn.set_mask(tri_mask_pinn)
-        triang_fem.set_mask(tri_mask_fem)
-        # left: PINN
-        ax = axs[i,0]
-        pcm = ax.tripcolor(triang_pinn, pinn_activation_time_masked,
-                   cmap='plasma', vmin=0, vmax=max_activation_time, shading='gouraud')
-        ax.scatter(x_boundary, y_boundary, color='black', s=1)
-        ax.set_aspect('equal')
-        if i == 0:
-            ax.set_title("PINN", fontsize=25, fontweight='bold')
-
-        # right: FEM
-        ax2 = axs[i,1]
-        ax2.tripcolor(triang_fem, fem_activation_time_masked,
-              cmap='plasma', vmin=0, vmax=max_activation_time, shading='gouraud')
-        ax2.scatter(x_boundary, y_boundary, color='black', s=1)
-        ax2.set_aspect('equal')
-        if i == 0:
-            ax2.set_title("FEM", fontsize=25, fontweight='bold')
-
-        # hide spines
-        for aa in (ax, ax2):
-            for sp in aa.spines.values():
-                sp.set_visible(False)
-                
-                if i == n_exp-1:
-                    axs[i,0].spines['bottom'].set_visible(True)
-                    axs[i,1].spines['bottom'].set_visible(True)
-        axs[i,0].spines['left'].set_visible(True)
-        # vertical row-label: bold g_il including units
-        # 1) draw the y-axis label in default color
-        ax.set_ylabel(
-            "y [mm]",
-            fontsize=20,
-            rotation=90,
-            labelpad=30,
-            color="black",
-            va="center"
-        )
-        # decide color based on category
-        gil = g_il_values[exp_idx]
-        if exp_idx in sampled_indices:
-            txt_color = 'g'
-        elif exp_idx in interpolation_idx:
-            txt_color = 'b'
-        else:
-            # everything else is extrapolation
-            txt_color = 'r'
-
-        # bold, colored g_il text
-        g_str = rf"$\mathbf{{g_{{il}}={gil:.3f}\,\mathbf{{S/m}}}}$"
-        ax.text(
-            x=-0.40, y=0.5, s=g_str,
-            transform=ax.transAxes,
-            fontsize=22,
-            va="center", ha="center",
-            rotation=90,
-            color=txt_color
-        )
-
-        # ticks: y only on left column; x only on bottom row
-        ax.tick_params(
-            left=True, labelleft=True,
-            bottom=(i==n_exp-1), labelbottom=(i==n_exp-1)
-        )
-        ax2.tick_params(
-            left=False, labelleft=False,
-            bottom=(i==n_exp-1), labelbottom=(i==n_exp-1)
-        )
-
-        # x-axis labels on bottom row
-        if i == n_exp-1:
-            ax.set_xlabel("x [mm]", fontsize=20)
-            ax2.set_xlabel("x [mm]", fontsize=20)
-        plt.ylim(vertices[:,1].min(),vertices[:,1].max()+1)
-        
-        
-    fig.subplots_adjust(
-        left=0.20,
-        right=0.88,
-        top=1.0,    # ⬅️ push the subplots down to 75% of the figure
-        bottom=0.1,
-        hspace=0.0001,
-        wspace=0.01
-    )
-
-    # … draw your tripcolor plots …
-
-    # now add the horizontal colorbar *over* the space you freed up:
-    cb = fig.colorbar(
-        pcm,
-        ax=axs,
-        orientation='horizontal',
-        location='bottom',    # requires mpl ≥3.2
-        fraction=0.02,     # bar thickness
-        pad=0.05,          # small pad from the top of the subplot area
-        label=r"$AT$ [ms]",
-    )
-    cb.ax.xaxis.set_ticks_position('bottom')
-    cb.ax.xaxis.set_label_position('bottom')
-    #plt.tight_layout()
-    #plt.tight_layout(pad=0.5, h_pad=0.02)
-
-
-    plt.savefig(f"./results/{filename}",
-                dpi=300)
-    plt.close(fig)
 
 def plot_vm_vertical_zoom(
         t_plot,        # time in same units as dt=5
-        experiments,   # list of experiment indices
+        gils_plot,   # list of experiment conductivities
         filename,zoom
     ) -> None:
     set_plot_env()
@@ -552,7 +407,6 @@ def plot_vm_vertical_zoom(
     train_gil       = g_il_values[sampled_indices]
     interpolation_idx=np.array([3,7,11])
     interpolation_gil = g_il_values[interpolation_idx]
-    
 
     vertices, triangles, _ = get_data()
     vertices *= 1e-3
@@ -639,7 +493,7 @@ def plot_vm_vertical_zoom(
             txt_color = 'r'
 
         # bold, colored g_il text
-        g_str = rf"$\mathbf{{g_{{il}}={gil:.3f}\,\mathbf{{S/m}}}}$"
+        g_str = get_gstr(gil) #rf"$\mathbf{{g_{{il}}={gil:.3f}\,\mathbf{{S/m}}}}$"
         ax.text(
             x=-0.40, y=0.5, s=g_str,
             transform=ax.transAxes,
@@ -716,81 +570,135 @@ def plot_vm_vertical_zoom(
                 dpi=300)
     plt.close(fig)
 
+class MeshPlotData(object):
+    def __init__(self, cmap, vmin, vmax, cbar_label):
 
+        self.cmap = cmap
+        self.vmin = vmin
+        self.vmax = vmax
+        self.cbar_label = cbar_label
 
-def plot_vm_vertical(t_plot, experiments, filename) -> None:
-    set_plot_env()
+        self.vertices, self.triangles, _ = get_data()
+        self.vertices *= 1e-3
 
-    g_il_values = np.array([
-        0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04,
-        0.045, 0.05, 0.055, 0.06, 0.065, 0.07,
-        0.075, 0.08, 0.085, 0.09, 0.095, 0.1
-    ])
-    indices_experiments = np.arange(len(g_il_values)-6, dtype=int)
-    sampled_indices = indices_experiments[(
-        indices_experiments + 1) % 4 != 0]
-    sampled_indices = sampled_indices[:12]
-    extrapolation_gil = g_il_values[-5:]
-    train_gil       = g_il_values[sampled_indices]
-    interpolation_idx=np.array([3,7,11])
-    interpolation_gil = g_il_values[interpolation_idx]
-    
+        self.triang = tri.Triangulation(self.vertices[:,0], 
+                                        self.vertices[:,1],
+                                        self.triangles)
 
-    vertices, triangles, _ = get_data()
-    vertices *= 1e-3
+class VMMeshPlotData(MeshPlotData):
+    def __init__(self, t_plot):
+        super().__init__('cividis', -80, 20, r"$V_m$ [mV]")
 
-    vm_FEM   = np.load("./data/vm_variation_scar_full.npy")            # (T, V, E)
-    vm_PIMM = np.load("./data/vm_PINN.npy")            # (T, V, E)
-    cond_all = np.load("./data/conductivities_variation_scar_full.npy")
-    cond_all *= 12.9/1.4
+        self.vm_FEM   = np.load("./data/vm_variation_scar_full.npy")            # (T, V, E)
+        self.vm_PIMM = np.load("./data/vm_PINN.npy")            # (T, V, E)
+        cond_all = np.load("./data/conductivities_variation_scar_full.npy")
+        cond_all *= 12.9/1.4
 
-    dt = 5
-    T  = vm_FEM.shape[0]
-    t  = np.linspace(0, (T-1)*dt, T)/12.9
+        dt = 5
+        T  = self.vm_FEM.shape[0]
+        t  = np.linspace(0, (T-1)*dt, T)/12.9
 
-    frame = int(t_plot/dt)
-    if frame < 0 or frame >= T:
-        raise ValueError("t_plot out of range")
+        self.frame = int(t_plot/dt)
+        if self.frame < 0 or self.frame >= T:
+            raise ValueError("t_plot out of range")
 
-    n_exp = len(experiments)
+        self.t_plot = t_plot
 
-
-    # create n_exp × 2 grid, share axes
-    fig, axs = plt.subplots(
-        nrows=n_exp, ncols=2,
-        figsize=(12, 5*n_exp),
-        sharex=True, sharey=True,
-        gridspec_kw={'hspace': 0.001}
-    )
-    # reduce vertical whitespace between rows
-    
-
-    triang = tri.Triangulation(vertices[:,0], vertices[:,1], triangles)
-    set_plot_env()
-    for i, exp_idx in enumerate(experiments):
+    def get_data(self, exp_idx):
         # FEM solution at t_plot
-        v_fem = vm_FEM[frame, :, exp_idx]
+        v_fem = self.vm_FEM[self.frame, :, exp_idx]
 
         # PINN prediction
-        v_pinn = vm_PIMM[frame, :, exp_idx]
+        v_pinn = self.vm_PIMM[self.frame, :, exp_idx]
+        return v_fem, self.triang, v_pinn, self.triang
 
+class ActMeshPlotData(MeshPlotData):
+    def __init__(self):
+        self.activations_all_FEM = np.load("./data/activations_all_FEM.npy")
+        self.activations_all_PINN = np.load("./data/activations_all_PINN.npy")
+
+        max_activation_time = np.nanmax(self.activations_all_FEM)
+        
+        super().__init__('plasma', 
+                          0,
+                          max_activation_time,
+                          r"$AT$ [ms]")
+
+    def get_data(self, exp_idx):
+
+        pinn_activation_time = self.activations_all_PINN[:, exp_idx]
+        fem_activation_time = self.activations_all_FEM[:, exp_idx]
+
+        fem_activation_time_masked = ma.masked_invalid(fem_activation_time)
+        pinn_activation_time_masked = ma.masked_invalid(pinn_activation_time)
+        
+        triang_pinn = tri.Triangulation(self.vertices[:, 0], self.vertices[:, 1], self.triangles)
+        triang_fem = tri.Triangulation(self.vertices[:, 0], self.vertices[:, 1], self.triangles)
+        
+        tri_mask_fem = np.any(np.isnan(fem_activation_time[self.triang.triangles]), axis=1)
+        tri_mask_pinn = np.any(np.isnan(pinn_activation_time[self.triang.triangles]), axis=1)
+        
+        triang_pinn.set_mask(tri_mask_pinn)
+        triang_fem.set_mask(tri_mask_fem)
+
+        return fem_activation_time_masked, triang_fem, pinn_activation_time_masked, triang_pinn
+
+def plot_meshdata_vertical(plotdata, gils_plot, filename) -> None:
+    set_plot_env()
+
+    g_il_values = EXPERIMENT_GILS
+    expernums = expernums_from_gils(gils_plot)
+
+    n_exp = len(expernums)
+
+    # create n_exp × 2 grid, share axes
+    fig, axs = plt.subplots(nrows=n_exp,
+                            ncols=2, 
+                            figsize=(15, 24), #5*n_exp
+                            sharex=True, 
+                            sharey=True,
+                            gridspec_kw={'hspace': 0.001})
+    
+    # reduce vertical whitespace between rows
+    set_plot_env()
+    
+    indicies = range(n_exp)
+    
+    for i, exp_idx, gil in zip(indicies, expernums, gils_plot):
+        
+        data_fem, triang_fem, data_pinn, triang_pinn = plotdata.get_data(exp_idx)
+        
         # left: PINN
         ax = axs[i,0]
-        pcm = ax.tripcolor(triang, v_pinn,
-                           shading='gouraud', cmap='cividis',
-                           vmin=-80, vmax=20)
+        pcm = ax.tripcolor(triang_pinn,
+                           data_pinn,
+                           shading='gouraud', 
+                           cmap = plotdata.cmap,
+                           vmin = plotdata.vmin, 
+                           vmax = plotdata.vmax,
+                           rasterized = True)
+
         ax.set_aspect('equal')
         if i == 0:
-            ax.set_title("PINN", fontsize=25, fontweight='bold')
-
+            ax.set_title("PINN",
+                         fontsize = 1.5 * plt.rcParams['axes.labelsize'],
+                         fontweight ='bold')
+ 
         # right: FEM
         ax2 = axs[i,1]
-        ax2.tripcolor(triang, v_fem,
-                      shading='gouraud', cmap='cividis',
-                      vmin=-80, vmax=20)
+        ax2.tripcolor(triang_fem, 
+                      data_fem,
+                      shading='gouraud',
+                      cmap = plotdata.cmap,
+                      vmin = plotdata.vmin, 
+                      vmax= plotdata.vmax,
+                      rasterized = True)
+
         ax2.set_aspect('equal')
         if i == 0:
-            ax2.set_title("FEM", fontsize=25, fontweight='bold')
+            ax2.set_title("FEM",
+                          fontsize=1.5 * plt.rcParams['axes.labelsize'],
+                          fontweight='bold')
 
         # hide spines
         for aa in (ax, ax2):
@@ -800,118 +708,72 @@ def plot_vm_vertical(t_plot, experiments, filename) -> None:
                 if i == n_exp-1:
                     axs[i,0].spines['bottom'].set_visible(True)
                     axs[i,1].spines['bottom'].set_visible(True)
+                    
         axs[i,0].spines['left'].set_visible(True)
         # vertical row-label: bold g_il including units
         # 1) draw the y-axis label in default color
-        ax.set_ylabel(
-            "y [mm]",
-            fontsize=20,
-            rotation=90,
-            labelpad=30,
-            color="black",
-            va="center"
-        )
+        ax.set_ylabel("y [mm]",
+                      fontsize=20,
+                      rotation=90,
+                      labelpad=30,
+                      color="black",
+                      va="center")
+
         # decide color based on category
-        gil = g_il_values[exp_idx]
-        if exp_idx in sampled_indices:
-            txt_color = 'g'
-        elif exp_idx in interpolation_idx:
-            txt_color = 'b'
-        else:
-            # everything else is extrapolation
-            txt_color = 'r'
+        txt_color, txt_label = get_dataset_color(gil)
 
         # bold, colored g_il text
-        g_str = rf"$\mathbf{{g_{{il}}={gil:.3f}\,\mathbf{{S/m}}}}$"
-        ax.text(
-            x=-0.40, y=0.5, s=g_str,
-            transform=ax.transAxes,
-            fontsize=22,
-            va="center", ha="center",
-            rotation=90,
-            color=txt_color
-        )
+        g_str = get_gstr(gil)
+        ax.text(x =-0.40,
+                y = 0.5,
+                s = g_str,
+                transform = ax.transAxes,
+                fontsize = 1.2*plt.rcParams['axes.labelsize'],
+                va="center", 
+                ha = "center",
+                rotation = 90,
+                color=txt_color)
 
         # ticks: y only on left column; x only on bottom row
-        ax.tick_params(
-            left=True, labelleft=True,
-            bottom=(i==n_exp-1), labelbottom=(i==n_exp-1)
+        ax.tick_params(left=True,
+                       labelleft=True,
+                       bottom=(i==n_exp-1),
+                       labelbottom=(i==n_exp-1)
         )
-        ax2.tick_params(
-            left=False, labelleft=False,
-            bottom=(i==n_exp-1), labelbottom=(i==n_exp-1)
+        ax2.tick_params(left=False,
+                        labelleft=False,
+                        bottom=(i==n_exp-1),
+                        labelbottom=(i==n_exp-1)
         )
 
         # x-axis labels on bottom row
         if i == n_exp-1:
             ax.set_xlabel("x [mm]", fontsize=20)
             ax2.set_xlabel("x [mm]", fontsize=20)
-        plt.ylim(vertices[:,1].min(),vertices[:,1].max()-1)
-    """
-    # single shared colorbar
-    h = 0.70/2
-    w = 0.02*2
-    # center it vertically in the original colorbar region:
-    y0 = 0.15 + (0.70 - h)/2
-    cax = fig.add_axes([1, y0, w, h])
-    fig.colorbar(pcm, cax=cax, label=r"$V_m$ [mV]")
-    """
-    # pull the titles (and grid) down a bit so there's room for the bar above them
-    # right after you create fig, axs:
-    fig.subplots_adjust(
-        left=0.20,
-        right=0.88,
-        top=1.0,    # ⬅️ push the subplots down to 75% of the figure
-        bottom=0.1,
-        hspace=0.0001,
-        wspace=0.01
-    )
+        plt.ylim(plotdata.vertices[:,1].min(), plotdata.vertices[:,1].max()-1)
 
-    # … draw your tripcolor plots …
-
-    # now add the horizontal colorbar *over* the space you freed up:
-    cb = fig.colorbar(
-        pcm,
-        ax=axs,
-        orientation='horizontal',
-        location='bottom',    # requires mpl ≥3.2
-        fraction=0.02,     # bar thickness
-        pad=0.05,          # small pad from the top of the subplot area
-        label=r"$V_m$ [mV]"
-    )
-    cb.ax.xaxis.set_ticks_position('bottom')
-    cb.ax.xaxis.set_label_position('bottom')
-    #plt.tight_layout()
-    #plt.tight_layout(pad=0.5, h_pad=0.02)
-
+    add_cbar_to_plotgrids(fig, axs, pcm, plotdata.cbar_label)
 
     plt.savefig(f"./results/{filename}",
                 dpi=300)
     plt.close(fig)
-def activation_error_vertical( filename) -> None:
-    """
-    Computes and plots the relative L1 error for all experiments.
 
-    Parameters:
-    pinn : object
-        The trained PINN model.
-    experiments : list of int
-        Indices of the experiments to evaluate.
-    vm_all : np.ndarray
-        Voltage data (time x space x experiments).
-    conductivities_all : np.ndarray
-        Conductivity data (space x parameters x parameters x experiments).
-    vertices : np.ndarray
-        Vertex positions (space x 2).
-    g_il_values : list of float
-        Values of `g_il` corresponding to each experiment.
-    activation_threshold : float, optional
-        Voltage threshold for determining activation, default is -40.
-    """
-    set_plot_env()
-    g_il_values = np.array([0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-                            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1])
+def get_vm_errordata():
+    g_il_values = EXPERIMENT_GILS
+    v_FEM_all = np.load("./data/vm_variation_scar_full.npy")
+    v_PINN_all = np.load("./data/vm_PINN.npy")
+    errors = np.zeros(len(g_il_values))
+    for g_il_index, g_il in enumerate(g_il_values):
+        v_PINN = v_PINN_all[:, :, g_il_index]
+        v_FEM = v_FEM_all[:, :, g_il_index]
+        # compute absolute error
+        abs_error = np.abs(v_PINN - v_FEM)
+        # compute relative error
+        rel_error = np.sum(abs_error) / np.sum(np.abs(v_FEM))
+        errors[g_il_index] = rel_error
+    return errors
 
+def get_act_errordata():
     vertices, triangles, _ = get_data()
     #scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
@@ -930,147 +792,61 @@ def activation_error_vertical( filename) -> None:
     t_end = (n_timepoints - 1) * dt
     t = np.linspace(t_start, t_end, n_timepoints) / 12.9
 
-    """
-    relative_L1_errors = []
-    for experiment in experiments:
-
-        pinn_activation_time = activations_all_PINN[:, experiment]
-        fem_activation_time = activations_all_FEM[:, experiment]
-
-        fem_activation_time_masked = ma.masked_invalid(fem_activation_time)
-        pinn_activation_time_masked = ma.masked_invalid(pinn_activation_time)
-        valid_fem = ~np.isnan(fem_activation_time)
-        valid_pinn = ~np.isnan(pinn_activation_time)
-        valid_indices = valid_fem & valid_pinn
-
-        if np.sum(valid_indices) > 0:
-            l1_error = np.sum(np.abs(pinn_activation_time[valid_indices] - fem_activation_time[valid_indices])) / \
-                np.sum(np.abs(fem_activation_time[valid_indices]))
-        else:
-            l1_error = np.nan
-
-        relative_L1_errors.append(l1_error)
-    """
     relative_L1_errors = np.nansum(
         np.abs(activations_all_PINN - activations_all_FEM), axis=0) / \
         np.nansum(np.abs(activations_all_FEM), axis=0)
-    indices_experiments = np.arange(len(g_il_values))
-    sampled_indices = indices_experiments[(
-        indices_experiments + 1) % 4 != 0]
-    sampled_indices=sampled_indices[:12]
-    extrapolation_gil = g_il_values[-5:]
-    train_gil       = g_il_values[sampled_indices]
-    interpolation_gil = g_il_values[
-        [i for i in range(len(g_il_values))
-         if g_il_values[i] not in extrapolation_gil
-         and g_il_values[i] not in train_gil]
-    ]
-    print("Extrapolation g_il", extrapolation_gil)
-    print("Train g_il", train_gil)
-    count_train = count_interp = count_extra = 0
-    # g_il not in extrapolation_gil and g_il not in train_gil
-    #interpolation_gil = g_il_values[[
-    #    i for i in range(len(g_il_values)) if g_il_values[i] not in extrapolation_gil and g_il_values[i] not in train_gil]]
+    return relative_L1_errors
 
-    bar_height = 0.005
-    fig, ax = plt.subplots(figsize=(12, 24))
-    for i, g_il in enumerate(g_il_values):
-        print("i:" ,i ,"-g_il: ", g_il, "- relative_L1_errors: ", relative_L1_errors[i])
-        h_kwargs = dict(height=bar_height)
-        if g_il in train_gil:
-            label = 'Training data' if count_train==0 else None
-            ax.barh(g_il, relative_L1_errors[i], label=label, color='g', **h_kwargs)
-            count_train += 1
-        elif g_il in interpolation_gil:
-            label = 'Interpolation' if count_interp==0 else None
-            ax.barh(g_il, relative_L1_errors[i], label=label, color='b', **h_kwargs)
-            count_interp += 1
-        else:
-            label = 'Extrapolation' if count_extra==0 else None
-            ax.barh(g_il, relative_L1_errors[i], label=label, color='r', **h_kwargs)
-            count_extra += 1
-
-    # all g_il values on x axis
-    ax.set_yticks(g_il_values)
-    ax.tick_params(axis='y', rotation=0)
-    # set ylim to 0.3
-    #ax.set_ylim(0, np.max(relative_L1_errors)*1.3)
-    # ax.plot(g_il_values, errors, 'o-', label='RMSE')
-    ax.set_xlabel(r'Relative $L^1$ error')
-    ax.set_ylabel(r'$g_{il}$ [S/m]')
-
-    plt.legend(loc='lower right')
-    path = f"./results/{filename}"
-    plt.savefig(path, bbox_inches='tight')
-
-def plot_vm_errors(filename):
+def plot_errorbars_horizontal(errors, xlabel, filename):
     set_plot_env()
-    v_FEM_all = np.load("./data/vm_variation_scar_full.npy")
-    v_PINN_all = np.load("./data/vm_PINN.npy")
-    g_il_values = np.array([0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04,
-                            0.045, 0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1])
-    errors= np.zeros(len(g_il_values))
-    for g_il_index, g_il in enumerate(g_il_values):
-        v_PINN = v_PINN_all[:, :, g_il_index]
-        v_FEM = v_FEM_all[:, :, g_il_index]
-        # compute absolute error
-        abs_error = np.abs(v_PINN - v_FEM)
-        # compute relative error
-        rel_error = np.sum(abs_error) / np.sum(np.abs(v_FEM))
-        errors[g_il_index] = rel_error
+    g_il_values = EXPERIMENT_GILS
     
-    #Get train, interpolation and extrapolation indices
-    indices_experiments = np.arange(len(g_il_values))
-    sampled_indices = indices_experiments[(
-        indices_experiments + 1) % 4 != 0]
-    sampled_indices=sampled_indices[:12]
-    print("Sampled indices", sampled_indices)
-    print("Sampled g_il", g_il_values[sampled_indices])
     bar_height = 0.005
+
     fig, ax = plt.subplots(figsize=(12, 24))
 
-    extrapolation_gil = g_il_values[-5:]
-    train_gil       = g_il_values[sampled_indices]
-    interpolation_gil = g_il_values[
-        [i for i in range(len(g_il_values))
-         if g_il_values[i] not in extrapolation_gil
-         and g_il_values[i] not in train_gil]
-    ]
-
     count_train = count_interp = count_extra = 0
-    for i, g_il in enumerate(g_il_values):
-        h_kwargs = dict(height=bar_height)
-        if g_il in train_gil:
-            label = 'Training data' if count_train==0 else None
-            ax.barh(g_il, errors[i], label=label, color='g', **h_kwargs)
-            count_train += 1
-        elif g_il in interpolation_gil:
-            label = 'Interpolation' if count_interp==0 else None
-            ax.barh(g_il, errors[i], label=label, color='b', **h_kwargs)
-            count_interp += 1
-        else:
-            label = 'Extrapolation' if count_extra==0 else None
-            ax.barh(g_il, errors[i], label=label, color='r', **h_kwargs)
-            count_extra += 1
+    
+    # Collect all data for a single bar chart
+    bar_colors = []
+    bar_labels = []
 
-    ax.set_yticks(g_il_values)
+    for g_il in g_il_values:
+        barcolor, label = get_dataset_color(g_il)
+        bar_colors.append(barcolor)
+        bar_labels.append(label)
+
+    # Remove the right and top borders
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+
+    # Align the x-axis with the bottom bar
+    ax.set_ylim(g_il_values[0] - bar_height / 2, g_il_values[-1] + bar_height / 2)
+
+    # Plot all bars in a single call
+    ax.barh(
+        g_il_values,  # y positions
+        errors,       # bar widths
+        color=bar_colors,
+        height=bar_height)
+
+    ax.set_yticks(g_il_values[::2])
     ax.tick_params(axis='y', rotation=0)
 
-    ax.set_xlabel(r'Relative $L^1$ error')
-    ax.set_ylabel(r'$g_{il}$ [S/m]')
+    ax.set_xlabel(xlabel, fontsize=1.5 * plt.rcParams['axes.labelsize'])
+    ax.set_ylabel(r'$g_{il}^s$ [S/m]')
 
-    plt.legend(loc='lower right')
+    #Unique legend
+    # Manually create legend with unique labels
+    unique_labels_colors = dict(zip(bar_labels, bar_colors))  # Ensure unique labels
+    legend_handles = [plt.Line2D([0], [0], color=color, lw=4, label=label) for label, color in unique_labels_colors.items()]
+    ax.legend(handles=legend_handles, loc='center right')
 
     path = os.path.join("./results/", filename)
     plt.savefig(path, bbox_inches='tight')
 
-
-def plot_data(t_plot, gil_vals, filename, zoom) -> None:
-    # Use the same g_il_values as in the original code
-    #g_il_values = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04,
-    #               0.045, 0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1]
-    
-    expernums = [np.where(np.isclose(EXPERIMENT_GILS, gil))[0][0] for gil in gil_vals]
+def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
+    expernums = expernums_from_gils(gil_vals)
     vertices, triangles, _ = get_data()
     # scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
@@ -1102,7 +878,6 @@ def plot_data(t_plot, gil_vals, filename, zoom) -> None:
     positions = range(len(gil_vals))
 
     for i, expernum, gil in zip(positions, expernums, gil_vals):
-
         fem_activation_time = activation_FEM_all[:, expernum]
 
         # Triangulate and mask invalid data for FEM and PINN
@@ -1137,7 +912,7 @@ def plot_data(t_plot, gil_vals, filename, zoom) -> None:
             triang_v, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis, rasterized = True)
 
         ax_AT.set_title(
-            r'$\bf{g_{{il}}}$ = '+f'{gil}' + r' S/m', fontsize=24, fontweight='bold')
+            r'$\bf{g_{{il}}^s}$ = '+f'{gil}' + r' S/m', fontsize=24, fontweight='bold')
         # aspect ratio
         ax_V.set_aspect('equal')
         ax_V.set_ylim(0, 76)
@@ -1201,26 +976,27 @@ def plot_data(t_plot, gil_vals, filename, zoom) -> None:
     plt.savefig(f"./results/{filename}", bbox_inches='tight')
     plt.close(fig)
 
-def plot_fem_zoom(t_plot,experiments, zoom, filename) -> None:
+def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
     """
     Plot 4x4 grid of 4 experiments with zoomed in region of FEM data
-
-
     """
     set_plot_env()
     
+    expernums = expernums_from_gils(gil_vals)
+
     vertices, triangles, _ = get_data()
     # scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
     vm_all = np.load("./data/vm_variation_scar_full.npy")
-    g_il_values = [0.01, 0.025, 0.03, 0.1]
-    triang = tri.Triangulation(
-        vertices[:, 0], vertices[:, 1], triangles)
+    triang = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
+
     # plot 4 experiments at t_plot
     fig, axs = plt.subplots(2, 2, figsize=(13, 10), sharex=True, sharey=True)
 
-    for i, experiment in enumerate(experiments):
-        v = vm_all[:, :, experiment]
+    positions = range(len(gil_vals))
+
+    for i, expernum, gil_val in zip(positions, expernums, gil_vals):
+        v = vm_all[:, :, expernum]
         v = v[int(t_plot/5), :]
         if i == 0:
             ax_index_x = 0
@@ -1235,11 +1011,10 @@ def plot_fem_zoom(t_plot,experiments, zoom, filename) -> None:
             ax_index_x = 1
             ax_index_y = 1
 
-        V_plot = axs[ax_index_y, ax_index_x].tripcolor(
-            triang, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis)
+        V_plot = axs[ax_index_y, ax_index_x].tripcolor(triang, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis, rasterized = True)
         # g_il value as title
         axs[ax_index_y, ax_index_x].set_title(
-            r'$\bf{g_{il}}$'+f'={g_il_values[experiment]:.3f}', fontsize=24, fontweight='bold', pad=10)
+            r'$\bf{g_{il}^s}$'+f'={gil_val:.3f}', fontsize=24, fontweight='bold', pad=10)
         # axs[ax_index_y, ax_index_x].text(0.5, 0.5, f'g_il={g_il_values[experiment]:.3f}', transform=axs[ax_index_y, ax_index_x].transAxes, fontsize=20,
         #                                 ha='center', va='center', bbox=dict(facecolor='white', alpha=0.5))
         # aspect
@@ -1271,15 +1046,10 @@ def plot_fem_zoom(t_plot,experiments, zoom, filename) -> None:
 
     cbar_ax = fig.add_axes([0.95, 0.15, 0.04, 0.7])
     fig.colorbar(V_plot, cax=cbar_ax, label=r"$V_{m}$ [mV]")
-
     
     fig.savefig(f"./results/{filename}", bbox_inches='tight')
 
 def data_split():
-    # All g_il values
-    #gil_all = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-    #           0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085,
-    #           0.09, 0.095, 0.1]
     gil_all = EXPERIMENT_GILS
 
     # Evaluation data
@@ -1320,70 +1090,52 @@ def data_split():
     # Save the plot
     plt.savefig("./results/data_split.pdf", bbox_inches='tight')
 
-def visualize_mesh(filename):
-    import matplotlib.tri as tri
-    vertices, triangles, _ = get_data()
-    vertices *= 1e-3  # convert to mm
-    set_plot_env()
-    f = h5py.File("./meshes/scarmesh_1.h5", "r")
-    verts = np.array(f["coordinates"])
-    print("verts shape", verts.shape)
-    elems = np.array(f["topology"])
-    fibres = np.array(f["fibres"])
-    element_marker = np.array(f["element_markers"])
-    f.close()
-    colored_triangles = []
-    colored_vertices = []
-    for i in range(elems.shape[0]):
-        if element_marker[i] == 3:
-            colored_triangles.append(elems[i])
-            colored_vertices.append(verts[elems[i]])
 
-    colored_triangles = np.array(colored_triangles)
-    colored_vertices = np.array(colored_vertices)
+def make_fig2(t_plot, gils_plot):
+    data_split()
+    
+    zoom = [50, 75, 15, 50]
+    
+    plot_fem_data(t_plot,
+                  gils_plot,
+                  "Fig2_a.svg",
+                  zoom)
 
-    #triang = tri.Triangulation(verts[:, 0], verts[:, 1], elems)
-    triang = tri.Triangulation(verts[:, 0], verts[:, 1], elems)
-    plt.triplot(triang)
-    for i,tri in enumerate(elems):
-        #if elem mark 0 orange if 3 blue
-        if element_marker[i] == 0:
-            plt.fill(verts[tri, 0], verts[tri, 1], color="orange")
-        elif element_marker[i] == 3:
-            plt.fill(verts[tri, 0], verts[tri, 1], color="blue")
-    
-    #aspect equal
-    plt.gca().set_aspect('equal', adjustable='box')
-    #Hide x and y axes
-    plt.xticks([])
-    plt.yticks([])
-    plt.axis('off')
-    
-    plt.savefig(f"./results/{filename}", bbox_inches='tight')
+    plot_fem_zoom(t_plot,
+                   gils_plot,
+                   zoom,
+                   "Fig2_c.svg")
+
+def make_fig3(t_plot, gils_plot):
+    vm_errors = get_vm_errordata()
+    plot_errorbars_horizontal(vm_errors, 
+                              r'$ \mathrm{\Delta}_{V_m}$',
+                              "Fig3_a.svg")
+
+    plot_meshdata_vertical(VMMeshPlotData(t_plot),
+                          gils_plot[::-1],
+                          "Fig3_b.svg")
+
+def make_fig4(gils_plot):
+    act_errors = get_act_errordata()
+    plot_errorbars_horizontal(act_errors, 
+                              r'$ \mathrm{\Delta}_{AT}$',
+                              "Fig4_a.svg")
+
+    plot_meshdata_vertical(ActMeshPlotData(),
+                          gils_plot[::-1],
+                          "Fig4_b.svg")
+                          
+def make_fig5(t_plot, gils_plot):
+    zoom = [55, 75, 15, 45]
+    #plot_vm_vertical_zoom(t_plot, experiments, "Fig5_a.pdf", zoom)
+    #activation_vertical_zoom( experiments, "Fig5_b.pdf", zoom)
 
 if __name__ == "__main__":
     t_plot = 430
+    gils_plot = [0.01, 0.02, 0.025, 0.1]
     
-    #Data split
-    data_split()
-    #Fig2: Data only
-    #experiments = [0, 1, 2, 3]
-    zoom = [50, 75, 15, 50]
-    plot_data(t_plot,
-              [0.01, 0.02, 0.025, 0.1],
-             "Fig2_a.svg",
-              zoom)
-    #visualize_mesh("mesh.pdf")
-    #plot_fem_zoom(t_plot, experiments, zoom, "Fig2_c.pdf")
-
-
-    #plot_vm_errors()
-    experiments =[18, 3, 2, 0]
-    zoom = [55, 75, 15, 45]
-    #plot_vm_errors("Fig3_b.pdf")
-    #plot_vm_vertical(t_plot,experiments, "Fig3_a.pdf")
-    #plot_vm_vertical_zoom(t_plot, experiments, "Fig5_a.pdf", zoom)
-    #activation_vertical(experiments, "Fig4_a.pdf")
-    #activation_error_vertical( "Fig4_b.pdf")
-    #activation_vertical_zoom( experiments, "Fig5_b.pdf", zoom)
-
+    #make_fig2(t_plot, gils_plot)
+    make_fig3(t_plot, gils_plot)
+    make_fig4(gils_plot)
+    #make_fig5(t_plot, gils_plot)
