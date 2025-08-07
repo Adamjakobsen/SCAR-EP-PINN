@@ -15,6 +15,8 @@ DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06,
               "interpolation": [0.025, 0.045, 0.065],
               "extrapolation": [0.085, 0.09, 0.095, 0.1]}
 
+ACT_LEVELS = 15
+
 def expernums_from_gils(gil_vals):
     return [np.where(np.isclose(EXPERIMENT_GILS, gil))[0][0] for gil in gil_vals]
 
@@ -96,12 +98,11 @@ def add_cbar_to_plotgrids(fig, axs, pcm, label):
     cb.ax.xaxis.set_label_position('bottom')
 
 class MeshPlotData(object):
-    def __init__(self, cmap, vmin, vmax, cbar_label):
+    def __init__(self, cmap, vmin, vmax):
 
         self.cmap = cmap
         self.vmin = vmin
         self.vmax = vmax
-        self.cbar_label = cbar_label
 
         self.vertices, self.triangles, _ = get_data()
         self.vertices *= 1e-3
@@ -112,7 +113,7 @@ class MeshPlotData(object):
 
 class VMMeshPlotData(MeshPlotData):
     def __init__(self, t_plot):
-        super().__init__('cividis', -80, 20, r"$V_m$ [mV]")
+        super().__init__('cividis', -80, 20)
 
         self.vm_FEM   = np.load("./data/vm_variation_scar_full.npy")            # (T, V, E)
         self.vm_PIMM = np.load("./data/vm_PINN.npy")            # (T, V, E)
@@ -129,13 +130,33 @@ class VMMeshPlotData(MeshPlotData):
 
         self.t_plot = t_plot
 
-    def get_data(self, exp_idx):
+    def _get_data(self, exp_idx):
         # FEM solution at t_plot
         v_fem = self.vm_FEM[self.frame, :, exp_idx]
 
         # PINN prediction
         v_pinn = self.vm_PIMM[self.frame, :, exp_idx]
-        return v_fem, self.triang, v_pinn, self.triang
+        return v_fem, v_pinn, self.triang
+
+    def comparative_plot(self, ax_FEM, ax_PINN, exp_idx):
+        fem_vm, pinn_vm, triang = self._get_data(exp_idx)
+        
+        pcm = ax_FEM.tripcolor(triang,
+                               fem_vm, 
+                               shading='gouraud',
+                               cmap=self.cmap,
+                               vmin=self.vmin,
+                               vmax=self.vmax,
+                               rasterized = True)
+
+        ax_PINN.tripcolor(triang,
+                          pinn_vm,
+                          shading='gouraud',
+                          cmap=self.cmap,
+                          vmin=self.vmin,
+                          vmax=self.vmax,
+                          rasterized = True)
+        return pcm
 
 class ActMeshPlotData(MeshPlotData):
     def __init__(self):
@@ -146,11 +167,9 @@ class ActMeshPlotData(MeshPlotData):
         
         super().__init__('plasma', 
                           0,
-                          max_activation_time,
-                          r"$AT$ [ms]")
-
-    def get_data(self, exp_idx):
-
+                          max_activation_time)
+        
+    def _get_data(self, exp_idx):
         pinn_activation_time = self.activations_all_PINN[:, exp_idx]
         fem_activation_time = self.activations_all_FEM[:, exp_idx]
 
@@ -168,6 +187,42 @@ class ActMeshPlotData(MeshPlotData):
 
         return fem_activation_time_masked, triang_fem, pinn_activation_time_masked, triang_pinn
 
+    def comparative_plot(self, ax_PINN, ax_FEM, exp_idx):
+        fem_activation_time_masked, triang_fem, pinn_activation_time_masked, triang_pinn = self._get_data(exp_idx)
+        
+        #Todo: Needs fixing/rasterization due to large vector graphic image sizes
+
+        #pcm = ax_FEM.tricontourf(triang_fem,
+        #                         fem_activation_time_masked, 
+        #                         levels=ACT_LEVELS,
+        #                         cmap=self.cmap,
+        #                         vmin=self.vmin,
+        #                         vmax=self.vmax)
+
+        # ax_PINN.tricontourf(triang_pinn,
+        #                     pinn_activation_time_masked,
+        #                     levels=ACT_LEVELS,
+        #                     cmap=self.cmap,
+        #                     vmin=self.vmin,
+        #                     vmax=self.vmax)
+
+        pcm = ax_FEM.tripcolor(triang_fem,
+                               fem_activation_time_masked, 
+                               shading='gouraud',
+                               cmap=self.cmap,
+                               vmin=self.vmin,
+                               vmax=self.vmax,
+                               rasterized = True)
+
+        ax_PINN.tripcolor(triang_pinn,
+                          pinn_activation_time_masked,
+                          shading='gouraud',
+                          cmap=self.cmap,
+                          vmin=self.vmin,
+                          vmax=self.vmax,
+                          rasterized = True)
+        return pcm
+
 def plot_mesh_boundary(ax):
     boundary, lines = get_boundary()
     boundary = boundary * 1e-3
@@ -180,12 +235,12 @@ def plot_mesh_boundary(ax):
 
     ax.plot(x_coords.T, y_coords.T, linewidth=3, color="k")
 
-def plot_meshdata_vertical(plotdata, 
-                          gils_plot,
-                          filename,
-                          zoom = None,
-                          figsize = (15, 24),
-                          trace_meshboundary = False) -> None:
+def plot_meshdata_vertical(actplotdata,
+                           vmplotdata, 
+                           gils_plot,
+                           figsize,
+                           filename,
+                           zoom = None) -> None:
     set_plot_env()
 
     g_il_values = EXPERIMENT_GILS
@@ -193,127 +248,120 @@ def plot_meshdata_vertical(plotdata,
 
     n_exp = len(expernums)
 
-    # create n_exp × 2 grid, share axes
+    # create n_exp × 4 grid, share axes
     fig, axs = plt.subplots(nrows=n_exp,
-                            ncols=2, 
+                            ncols=4, 
                             figsize = figsize,
                             sharex=True, 
                             sharey=True,
-                            gridspec_kw={'hspace': 0.001})
+                            gridspec_kw={'hspace': 0.01, 'wspace': 0.01})
     
-    # reduce vertical whitespace between rows
-    set_plot_env()
-    
+    # Adjust the bottom margin to make space for colorbars
+    fig.subplots_adjust(bottom=0.15)  # Increase bottom margin
+
     indicies = range(n_exp)
-    
-    for i, exp_idx, gil in zip(indicies, expernums, gils_plot):
+    for i, expernum, gil in zip(indicies, expernums, gils_plot):
+        # left: Act
+        ax_actPINN = axs[i,0]
+        ax_actFEM = axs[i,1]
         
-        data_fem, triang_fem, data_pinn, triang_pinn = plotdata.get_data(exp_idx)
+        # right: Vm
+        ax_VmPINN = axs[i,2]
+        ax_VmFEM = axs[i,3]
+
+        pcm_act = actplotdata.comparative_plot(ax_actFEM,
+                                               ax_actPINN,
+                                               expernum)
+
+        pcm_vm = vmplotdata.comparative_plot(ax_VmFEM,
+                                             ax_VmPINN,
+                                             expernum)
+
+        #Add Mesh boundaries to Act data
+        for ax in [ax_actPINN, ax_actFEM]:
+            plot_mesh_boundary(ax)        
         
-        # left: PINN
-        ax = axs[i,0]
-        pcm = ax.tripcolor(triang_pinn,
-                           data_pinn,
-                           shading='gouraud', 
-                           cmap = plotdata.cmap,
-                           vmin = plotdata.vmin, 
-                           vmax = plotdata.vmax,
-                           rasterized = True)
-        
-        ax.set_aspect('equal')
-        if i == 0:
-            ax.set_title("PINN",
-                         fontsize = 1.5 * plt.rcParams['axes.labelsize'],
-                         fontweight ='bold')
- 
-        # right: FEM
-        ax2 = axs[i,1]
-        ax2.tripcolor(triang_fem, 
-                      data_fem,
-                      shading='gouraud',
-                      cmap = plotdata.cmap,
-                      vmin = plotdata.vmin, 
-                      vmax= plotdata.vmax,
-                      rasterized = True)
-
-        ax2.set_aspect('equal')
-        if i == 0:
-            ax2.set_title("FEM",
-                          fontsize=1.5 * plt.rcParams['axes.labelsize'],
-                          fontweight='bold')
-
-        if trace_meshboundary:
-            plot_mesh_boundary(ax)
-            plot_mesh_boundary(ax2)
-
-        # hide spines
-        for aa in (ax, ax2):
-            for sp in aa.spines.values():
-                sp.set_visible(False)
-                
-                if i == n_exp-1:
-                    axs[i,0].spines['bottom'].set_visible(True)
-                    axs[i,1].spines['bottom'].set_visible(True)
-                    
-        axs[i,0].spines['left'].set_visible(True)
         # vertical row-label: bold g_il including units
         # 1) draw the y-axis label in default color
-        ax.set_ylabel("y [mm]",
-                      fontsize=20,
-                      rotation=90,
-                      labelpad=30,
-                      color="black",
-                      va="center")
+        axs[i,0].set_ylabel("y [mm]",
+                           fontsize=20,
+                           rotation=90,
+                           labelpad=30,
+                           color="black",
+                           va="center")
 
         # decide color based on category
         txt_color = get_dataset_color(gil)
-
-        # bold, colored g_il text
         g_str = get_gstr(gil)
-        ax.text(x =-0.40,
-                y = 0.5,
-                s = g_str,
-                transform = ax.transAxes,
-                fontsize = 1.2*plt.rcParams['axes.labelsize'],
-                va="center", 
-                ha = "center",
-                rotation = 90,
-                color=txt_color)
 
-        # ticks: y only on left column; x only on bottom row
-        ax.tick_params(left=True,
-                       labelleft=True,
-                       bottom=(i==n_exp-1),
-                       labelbottom=(i==n_exp-1)
-        )
-        ax2.tick_params(left=False,
-                        labelleft=False,
-                        bottom=(i==n_exp-1),
-                        labelbottom=(i==n_exp-1)
-        )
+        #Add row label with g_il^s value
+        axs[i,0].text(x =-0.40,
+                      y = 0.5,
+                      s = g_str,
+                      transform = axs[i,0].transAxes,
+                      fontsize = 1.2*plt.rcParams['axes.labelsize'],
+                      va="center", 
+                      ha = "center",
+                      rotation = 90,
+                      color=txt_color)
 
-        # x-axis labels on bottom row
-        if i == n_exp-1:
-            ax.set_xlabel("x [mm]", fontsize=20)
-            ax2.set_xlabel("x [mm]", fontsize=20)
+    #Remove unneeded ticks and spines
+    for ax in axs[:, 1:].flat:
+        ax.tick_params(left=False, labelleft=False)
+        ax.spines['left'].set_visible(False)
 
-        if zoom:
-            plt.ylim(zoom[0],zoom[1])
-            plt.xlim(zoom[2],zoom[3])
-        else:
-            pad = 1
-            ymin = plotdata.vertices[:,1].min()
-            ymax = plotdata.vertices[:,1].max()
-            if trace_meshboundary:
-                ymin -= pad
-                ymax += pad
+    for ax in axs[:-1, :].flat:
+        ax.tick_params(bottom = False, labelbottom = False)
+        ax.spines['bottom'].set_visible(False)
+    
+    for ax in axs.flat:
+        ax.spines['right'].set_visible(False)
+        ax.spines['top'].set_visible(False)
 
-            plt.ylim(ymin, ymax)
+    if zoom:
+        plt.ylim(zoom[0],zoom[1])
+        plt.xlim(zoom[2],zoom[3])
+    else:
+        for ax in axs.flat:
+            ax.set_aspect('equal')
 
-    add_cbar_to_plotgrids(fig, axs, pcm, plotdata.cbar_label)
+        pad = 1
+        ymin = vmplotdata.vertices[:,1].min() - pad
+        ymax = vmplotdata.vertices[:,1].max() + pad
+        plt.ylim(ymin, ymax)
+
+    #Column titles PINN or FEM
+    for ax, coltitle in zip(axs[0,:], ["PINN", "FEM"]*2):
+        ax.set_title(coltitle,
+                    fontsize = 1.5 * plt.rcParams['axes.labelsize'],
+                    fontweight ='bold')
+    
+    # x-axis labels on bottom row
+    for ax in axs[-1,:]:
+        ax.set_xlabel("x [mm]", fontsize=20)
+
+    # Add colorbar for the first and second columns
+    cbar_ax1 = fig.add_axes([0.125, 0.08, 0.35, 0.02])  # [left, bottom, width, height]
+    
+    cbar1 = fig.colorbar(pcm_act,
+                         cax=cbar_ax1,
+                         orientation='horizontal')
+
+    cbar1.set_label(r"$AT$ [ms]", fontsize = 1.2*plt.rcParams['axes.labelsize'])
+
+    # Add colorbar for the third and fourth columns
+    cbar_ax2 = fig.add_axes([0.55, 0.08, 0.35, 0.02])  # [left, bottom, width, height]
+    
+    cbar2 = fig.colorbar(pcm_vm, 
+                         cax=cbar_ax2,
+                         orientation='horizontal')
+
+    cbar2.set_label(r"$V_m$ [mV]", fontsize = 1.2*plt.rcParams['axes.labelsize'])
+
+    #add_cbar_to_plotgrids(fig, axs, pcm, plotdata.cbar_label)
 
     plt.savefig(f"./results/{filename}",
-                dpi=300)
+                 bbox_inches='tight') #dpi=300
     plt.close(fig)
 
 def get_vm_errordata():
@@ -330,12 +378,6 @@ def get_vm_errordata():
         rel_error = np.sum(abs_error) / np.sum(np.abs(v_FEM))
         errors[g_il_index] = rel_error
     return errors
-
-def calculate_inactivation_dice_coefficient(isnanFEM, isnanPINN):
-    intersection = np.sum(np.logical_and(isnanFEM, isnanPINN), axis=0)
-    sum_isnan = np.sum(isnanFEM, axis=0) + np.sum(isnanPINN, axis=0)
-    dice_coefficient = 2 * intersection / sum_isnan
-    return dice_coefficient
 
 def get_act_errordata():
     activations_all_FEM = np.load("./data/activations_all_FEM.npy")
@@ -368,6 +410,12 @@ def get_act_errordata():
     relabs_errors /= np.sum(np.abs(act_FEM), axis=0)
     
     return relabs_errors, inactivation_df
+
+def calculate_inactivation_dice_coefficient(isnanFEM, isnanPINN):
+    intersection = np.sum(np.logical_and(isnanFEM, isnanPINN), axis=0)
+    sum_isnan = np.sum(isnanFEM, axis=0) + np.sum(isnanPINN, axis=0)
+    dice_coefficient = 2 * intersection / sum_isnan
+    return dice_coefficient
 
 def plot_errorbars_horizontal(xlabel, filename):
     set_plot_env()
@@ -459,8 +507,12 @@ def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
         triang.set_mask(tri_mask_fem)
 
         ax_AT = axs_grid[0, :].flatten()[i]
-        tc_fem = ax_AT.tricontourf(triang, fem_activation_time_masked, levels=15,
-                                   cmap='plasma', vmin=0, vmax=max_activation_time)
+        tc_fem = ax_AT.tricontourf(triang, 
+                                   fem_activation_time_masked,
+                                   levels=ACT_LEVELS,
+                                   cmap='plasma',
+                                   vmin=0,
+                                   vmax=max_activation_time)
         if i == 0:
             tc_fem0 = tc_fem
 
@@ -475,11 +527,15 @@ def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
         v = vm_all[:, :, expernum]
         v = v[int(t_plot/5), :]
 
-        V_plot = ax_V.tripcolor(
-            triang_v, v, shading='gouraud', vmin=-80, vmax=20, cmap=plt.cm.cividis, rasterized = True)
+        V_plot = ax_V.tripcolor(triang_v,
+                                v,
+                                shading='gouraud',
+                                vmin=-80,
+                                vmax=20,
+                                cmap=plt.cm.cividis,
+                                rasterized = True)
 
-        ax_AT.set_title(
-            r'$\bf{g_{{il}}^s}$ = '+f'{gil}' + r' S/m', fontsize=24, fontweight='bold')
+        ax_AT.set_title(r'$\bf{g_{{il}}^s}$ = '+f'{gil}' + r' S/m', fontsize=24, fontweight='bold')
         # aspect ratio
         ax_V.set_aspect('equal')
         ax_V.set_ylim(0, 76)
@@ -498,15 +554,8 @@ def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
     Cbar_V = fig.colorbar(V_plot, cax=cbar_ax_V)
     Cbar_V.ax.tick_params(labelsize=22)
     Cbar_V.set_label(r'$V_m$ [mV]', fontsize=24)
-    # Add a single colorbar for all subplots
-    # cbar_ax = fig.add_axes([0.92, 0.1, 0.03, 0.8])
-    # cbar = fig.colorbar(tc_fem0, cax=cbar_ax,
-    #                    label='Activation time [ms]')
-    # cbar_ax.tick_params(labelsize=22)
-    # cbar.set_label('Activation time [ms]', fontsize=30)
 
     # hide all spines and ticks if not necessary (only keep left y axis (axs_grid[:,0]) and bottom x axis (axs_grid[-1, :]))
-
     for ax in axs_grid.flat:
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -669,41 +718,40 @@ def make_fig2(t_plot, gils_plot):
                   zoom)
 
     plot_fem_zoom(t_plot,
-                   gils_plot,
-                   zoom,
-                   "Fig2_c.svg")
+                  gils_plot,
+                  zoom,
+                  "Fig2_c.svg")
 
 def make_fig3(vm_errors, act_errors):
     plot_combined_errors(act_errors, 
                          vm_errors,
                          "Fig3.svg")
 
-def make_fig4(vm_errors, act_errors, t_plot, gils_plot):
+def make_fig4(t_plot, gils_plot):
+    figsize = (27, 24)
+
     plot_meshdata_vertical(ActMeshPlotData(),
+                           VMMeshPlotData(t_plot),
                            gils_plot[::-1],
-                           "Fig4_a.svg",
-                           trace_meshboundary = True)
-    
-    plot_meshdata_vertical(VMMeshPlotData(t_plot),
-                           gils_plot[::-1],
-                           "Fig4_b.svg")
+                           figsize,
+                           "Fig4.svg")
 
 def make_fig5(t_plot, gils_plot):
     zoom = [55, 75, 15, 45]
     figsize = (15, 20)
 
     plot_meshdata_vertical(ActMeshPlotData(),
+                           VMMeshPlotData(t_plot),
                            gils_plot[::-1],
+                           figsize,
                            "Fig5_a.svg",
-                           zoom = zoom,
-                           figsize = figsize,
-                           trace_meshboundary = True)
+                           zoom = zoom)
 
-    plot_meshdata_vertical(VMMeshPlotData(t_plot),
-                           gils_plot[::-1],
-                           "Fig5_b.svg",
-                           zoom = zoom,
-                           figsize = figsize)
+    #plot_meshdata_vertical(VMMeshPlotData(t_plot),
+    #                       gils_plot[::-1],
+     #                      "Fig5_b.svg",
+      #                     zoom = zoom,
+       #                    figsize = figsize)
 
 if __name__ == "__main__":
     t_plot = 430
@@ -715,7 +763,7 @@ if __name__ == "__main__":
     with open("./results/inactivation_data.txt", "w") as f:
         f.write(inact_df.dropna().to_latex())
 
-    make_fig2(t_plot, gils_plot)
-    make_fig3(vm_errors, act_errors)
-    make_fig4(vm_errors, act_errors, t_plot, gils_plot)
-    make_fig5(t_plot, gils_plot)
+    #make_fig2(t_plot, gils_plot)
+    #make_fig3(vm_errors, act_errors)
+    make_fig4(t_plot, gils_plot)
+    #make_fig5(t_plot, gils_plot)
