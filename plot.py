@@ -169,35 +169,19 @@ class ActMeshPlotData(MeshPlotData):
         
         #Todo: Needs fixing/rasterization due to large vector graphic image sizes
 
-        #pcm = ax_FEM.tricontourf(triang_fem,
-        #                         fem_activation_time_masked, 
-        #                         levels=ACT_LEVELS,
-        #                         cmap=self.cmap,
-        #                         vmin=self.vmin,
-        #                         vmax=self.vmax)
+        pcm = ax_FEM.tricontourf(triang_fem,
+                                fem_activation_time_masked, 
+                                levels=ACT_LEVELS,
+                                cmap=self.cmap,
+                                vmin=self.vmin,
+                                vmax=self.vmax)
 
-        # ax_PINN.tricontourf(triang_pinn,
-        #                     pinn_activation_time_masked,
-        #                     levels=ACT_LEVELS,
-        #                     cmap=self.cmap,
-        #                     vmin=self.vmin,
-        #                     vmax=self.vmax)
-
-        pcm = ax_FEM.tripcolor(triang_fem,
-                               fem_activation_time_masked, 
-                               shading='gouraud',
-                               cmap=self.cmap,
-                               vmin=self.vmin,
-                               vmax=self.vmax,
-                               rasterized = True)
-
-        ax_PINN.tripcolor(triang_pinn,
-                          pinn_activation_time_masked,
-                          shading='gouraud',
-                          cmap=self.cmap,
-                          vmin=self.vmin,
-                          vmax=self.vmax,
-                          rasterized = True)
+        ax_PINN.tricontourf(triang_pinn,
+                            pinn_activation_time_masked,
+                            levels=ACT_LEVELS,
+                            cmap=self.cmap,
+                            vmin=self.vmin,
+                            vmax=self.vmax)
         return pcm
 
 def plot_mesh_boundary(ax):
@@ -700,4 +684,4 @@ if __name__ == "__main__":
     #make_fig2(t_plot, gils_plot)
     #make_fig3(vm_errors, act_errors)
     make_fig4(t_plot, gils_plot)
-    #make_fig5(t_plot, gils_plot)
+    make_fig5(t_plot, gils_plot)
