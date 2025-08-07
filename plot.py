@@ -8,6 +8,7 @@ from matplotlib.patches import Rectangle
 import numpy.ma as ma
 import seaborn as sns
 import os
+import pandas as pd
 
 EXPERIMENT_GILS = np.linspace(0.01, 0.1, 19)
 DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06, 0.07, 0.075, 0.08],
@@ -19,11 +20,21 @@ def expernums_from_gils(gil_vals):
 
 def get_dataset_color(gil):
     if np.isclose(gil, DATA_SPLIT["train"]).any():
-        return 'g', "Training"
+        return 'g'
     elif np.isclose(gil, DATA_SPLIT["interpolation"]).any():
-        return 'b', "Interpolation"
+        return 'b'
     elif np.isclose(gil, DATA_SPLIT["extrapolation"]).any():
-        return 'r', "Extrapolation"
+        return 'r'
+    else:
+        raise Exception(f"GIL {gil} not found in data split.")
+
+def get_dataset_label(gil):
+    if np.isclose(gil, DATA_SPLIT["train"]).any():
+        return "Training"
+    elif np.isclose(gil, DATA_SPLIT["interpolation"]).any():
+        return "Interpolation"
+    elif np.isclose(gil, DATA_SPLIT["extrapolation"]).any():
+        return "Extrapolation"
     else:
         raise Exception(f"GIL {gil} not found in data split.")
 
@@ -255,7 +266,7 @@ def plot_meshdata_vertical(plotdata,
                       va="center")
 
         # decide color based on category
-        txt_color, txt_label = get_dataset_color(gil)
+        txt_color = get_dataset_color(gil)
 
         # bold, colored g_il text
         g_str = get_gstr(gil)
@@ -320,31 +331,45 @@ def get_vm_errordata():
         errors[g_il_index] = rel_error
     return errors
 
+def calculate_inactivation_dice_coefficient(isnanFEM, isnanPINN):
+    intersection = np.sum(np.logical_and(isnanFEM, isnanPINN), axis=0)
+    sum_isnan = np.sum(isnanFEM, axis=0) + np.sum(isnanPINN, axis=0)
+    dice_coefficient = 2 * intersection / sum_isnan
+    return dice_coefficient
+
 def get_act_errordata():
-    vertices, triangles, _ = get_data()
-    #scar_vertices = np.load("./data/gregion3_coordinates.npy")
-    vertices = vertices * 1e-3
-    #scar_vertices = scar_vertices * 1e-3
-    vm_all = np.load("./data/vm_variation_scar_full.npy")
     activations_all_FEM = np.load("./data/activations_all_FEM.npy")
     activations_all_PINN = np.load("./data/activations_all_PINN.npy")
-    print("VM shape", vm_all.shape)
     
-    x = vertices[:, 0]
-    y = vertices[:, 1]
+    isnanFEM = np.isnan(activations_all_FEM)
+    isnanPINN = np.isnan(activations_all_PINN)
+    
+    inact_size_FEM =  isnanFEM.sum(axis= 0)
+    inact_size_PINN = isnanPINN.sum(axis = 0)
 
-    n_timepoints = vm_all.shape[0]
-    dt = 5
-    t_start = 0
-    t_end = (n_timepoints - 1) * dt
-    t = np.linspace(t_start, t_end, n_timepoints) / 12.9
+    inact_dice = calculate_inactivation_dice_coefficient(isnanFEM, isnanPINN)
 
-    relative_L1_errors = np.nansum(
-        np.abs(activations_all_PINN - activations_all_FEM), axis=0) / \
-        np.nansum(np.abs(activations_all_FEM), axis=0)
-    return relative_L1_errors
+    inactivation_df = pd.DataFrame(np.array([EXPERIMENT_GILS,
+                                             inact_size_FEM,
+                                             inact_size_PINN,
+                                             inact_dice]).T,
+                                             columns = ["$g_{il}^s$", "FEM", "PINN", "Dice"])
 
-def plot_errorbars_horizontal(errors, xlabel, filename):
+    notnull_FEMPINN = np.logical_not(isnanPINN | isnanFEM)
+    
+    act_FEM = np.zeros(activations_all_FEM.shape)
+    act_FEM[notnull_FEMPINN] = activations_all_FEM[notnull_FEMPINN]
+
+    act_PINN = np.zeros(activations_all_PINN.shape)
+    act_PINN[notnull_FEMPINN] = activations_all_PINN[notnull_FEMPINN]
+
+    # Calculate relative absolute errors for each row
+    relabs_errors = np.sum(np.abs(act_PINN - act_FEM), axis=0)
+    relabs_errors /= np.sum(np.abs(act_FEM), axis=0)
+    
+    return relabs_errors, inactivation_df
+
+def plot_errorbars_horizontal(xlabel, filename):
     set_plot_env()
     g_il_values = EXPERIMENT_GILS
     
@@ -355,13 +380,8 @@ def plot_errorbars_horizontal(errors, xlabel, filename):
     count_train = count_interp = count_extra = 0
     
     # Collect all data for a single bar chart
-    bar_colors = []
-    bar_labels = []
-
-    for g_il in g_il_values:
-        barcolor, label = get_dataset_color(g_il)
-        bar_colors.append(barcolor)
-        bar_labels.append(label)
+    bar_colors = [get_dataset_color(g_il) for g_il in g_il_values]
+    bar_labels = [get_dataset_label(g_il) for g_il in g_il_values]
 
     # Remove the right and top borders
     ax.spines['right'].set_visible(False)
@@ -594,10 +614,53 @@ def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
     cbar_ax = fig.add_axes([0.95, 0.15, 0.04, 0.7])
     fig.colorbar(V_plot, cax=cbar_ax, label=r"$V_{m}$ [mV]")
     
-    fig.savefig(f"./results/{filename}", bbox_inches='tight')
+    fig.savefig(f"./results/{filename}",
+                bbox_inches='tight')
+
+def plot_combined_errors(act_errors, vm_errors, filename):
+
+    set_plot_env()
+
+    fig, axs = plt.subplots(2, 1, figsize=(15, 6), sharex = True, sharey = True)
+    
+    # Collect all data for a single bar chart
+    bar_colors = list(map(get_dataset_color, EXPERIMENT_GILS))
+    bar_labels = list(map(get_dataset_label, EXPERIMENT_GILS))
+    
+    ticklabels = ["{:.3f}".format(gil) for gil in EXPERIMENT_GILS]
+
+    axs[0].bar(x = range(len(act_errors)),
+               height = act_errors,
+               color = bar_colors,
+               tick_label = ticklabels)
+    
+    axs[0].set_ylabel(r'$ \mathrm{\Delta}_{AT}$')
+
+    axs[1].bar(x = range(len(vm_errors)),
+               height = vm_errors,
+               color = bar_colors,
+               tick_label = ticklabels)
+    
+    axs[1].set_ylabel(r'$ \mathrm{\Delta}_{VM}$')
+
+    axs[1].tick_params(axis='x', rotation=90)
+    axs[1].set_xlabel("$g_{il}^s$ [S/m]")
+
+    # Add a legend to the right of the plots
+    unique_colors_labels = list(set(zip(bar_colors, bar_labels)))  # Get unique color-label pairs
+    unique_colors_labels.sort(key=lambda x: bar_colors.index(x[0]))  # Preserve original order
+
+    legend_handles = [plt.Line2D([0], [0], color=color, lw=4, label=label) 
+                      for color, label in unique_colors_labels]
+    axs[0].legend(handles=legend_handles, 
+                  loc='center left',
+                  bbox_to_anchor=(1.05, 0.5),
+                  title="Dataset")
+
+    plt.savefig(f"./results/{filename}",
+                bbox_inches='tight')
 
 def make_fig2(t_plot, gils_plot):
-    
     zoom = [50, 75, 15, 50]
     
     plot_fem_data(t_plot,
@@ -610,26 +673,20 @@ def make_fig2(t_plot, gils_plot):
                    zoom,
                    "Fig2_c.svg")
 
-def make_fig3(t_plot, gils_plot):
-    vm_errors = get_vm_errordata()
-    plot_errorbars_horizontal(vm_errors, 
-                              r'$ \mathrm{\Delta}_{V_m}$',
-                              "Fig3_a.svg")
+def make_fig3(vm_errors, act_errors):
+    plot_combined_errors(act_errors, 
+                         vm_errors,
+                         "Fig3.svg")
 
+def make_fig4(vm_errors, act_errors, t_plot, gils_plot):
     plot_meshdata_vertical(VMMeshPlotData(t_plot),
-                          gils_plot[::-1],
-                          "Fig3_b.svg")
-
-def make_fig4(gils_plot):
-    act_errors = get_act_errordata()
-    plot_errorbars_horizontal(act_errors, 
-                              r'$ \mathrm{\Delta}_{AT}$',
-                              "Fig4_a.svg")
+                           gils_plot[::-1],
+                           "Fig4_a.svg")
 
     plot_meshdata_vertical(ActMeshPlotData(),
-                          gils_plot[::-1],
-                          "Fig4_b.svg",
-                          trace_meshboundary = True)
+                           gils_plot[::-1],
+                           "Fig4_b.svg",
+                           trace_meshboundary = True)
 
 def make_fig5(t_plot, gils_plot):
     zoom = [55, 75, 15, 45]
@@ -652,7 +709,13 @@ if __name__ == "__main__":
     t_plot = 430
     gils_plot = [0.01, 0.02, 0.025, 0.1]
     
-    #make_fig2(t_plot, gils_plot)
-    #make_fig3(t_plot, gils_plot)
-    make_fig4(gils_plot)
-    #make_fig5(t_plot, gils_plot)
+    vm_errors = get_vm_errordata()
+    act_errors, inact_df = get_act_errordata()
+
+    with open("./results/inactivation_data.txt", "w") as f:
+        f.write(inact_df.dropna().to_latex())
+
+    make_fig2(t_plot, gils_plot)
+    make_fig3(vm_errors, act_errors)
+    make_fig4(vm_errors, act_errors, t_plot, gils_plot)
+    make_fig5(t_plot, gils_plot)
