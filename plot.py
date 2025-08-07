@@ -74,29 +74,6 @@ def set_plot_env():
     sns.set_theme(context=context, style="ticks",
                   palette="colorblind", font="sans-serif", font_scale=1)
 
-def add_cbar_to_plotgrids(fig, axs, pcm, label):
-    fig.subplots_adjust(
-        left=0.20,
-        right=0.88,
-        top=0.9,    # ⬅️ push the subplots down to 75% of the figure
-        bottom=0.1,
-        hspace=0.001,
-        wspace=0.15
-    )
-    # now add the horizontal colorbar *over* the space you freed up:
-    cb = fig.colorbar(
-        pcm,
-        ax=axs,
-        orientation='horizontal',
-        location='bottom',    # requires mpl ≥3.2
-        fraction=0.05,     # bar thickness
-        pad=0.07,          # small pad from the top of the subplot area
-        label=label, #r"$AT$ [ms]"
-    )
-
-    cb.ax.xaxis.set_ticks_position('bottom')
-    cb.ax.xaxis.set_label_position('bottom')
-
 class MeshPlotData(object):
     def __init__(self, cmap, vmin, vmax):
 
@@ -239,6 +216,7 @@ def plot_meshdata_vertical(actplotdata,
                            vmplotdata, 
                            gils_plot,
                            figsize,
+                           gridspec_kw,
                            filename,
                            zoom = None) -> None:
     set_plot_env()
@@ -254,7 +232,7 @@ def plot_meshdata_vertical(actplotdata,
                             figsize = figsize,
                             sharex=True, 
                             sharey=True,
-                            gridspec_kw={'hspace': 0.01, 'wspace': 0.01})
+                            gridspec_kw=gridspec_kw)
     
     # Adjust the bottom margin to make space for colorbars
     fig.subplots_adjust(bottom=0.15)  # Increase bottom margin
@@ -416,49 +394,6 @@ def calculate_inactivation_dice_coefficient(isnanFEM, isnanPINN):
     sum_isnan = np.sum(isnanFEM, axis=0) + np.sum(isnanPINN, axis=0)
     dice_coefficient = 2 * intersection / sum_isnan
     return dice_coefficient
-
-def plot_errorbars_horizontal(xlabel, filename):
-    set_plot_env()
-    g_il_values = EXPERIMENT_GILS
-    
-    bar_height = 0.005
-
-    fig, ax = plt.subplots(figsize=(12, 24))
-
-    count_train = count_interp = count_extra = 0
-    
-    # Collect all data for a single bar chart
-    bar_colors = [get_dataset_color(g_il) for g_il in g_il_values]
-    bar_labels = [get_dataset_label(g_il) for g_il in g_il_values]
-
-    # Remove the right and top borders
-    ax.spines['right'].set_visible(False)
-    ax.spines['top'].set_visible(False)
-
-    # Align the x-axis with the bottom bar
-    ax.set_ylim(g_il_values[0] - bar_height / 2, g_il_values[-1] + bar_height / 2)
-
-    # Plot all bars in a single call
-    ax.barh(
-        g_il_values,  # y positions
-        errors,       # bar widths
-        color=bar_colors,
-        height=bar_height)
-
-    ax.set_yticks(g_il_values[::2])
-    ax.tick_params(axis='y', rotation=0)
-
-    ax.set_xlabel(xlabel, fontsize=1.5 * plt.rcParams['axes.labelsize'])
-    ax.set_ylabel(r'$g_{il}^s$ [S/m]')
-
-    #Unique legend
-    # Manually create legend with unique labels
-    unique_labels_colors = dict(zip(bar_labels, bar_colors))  # Ensure unique labels
-    legend_handles = [plt.Line2D([0], [0], color=color, lw=4, label=label) for label, color in unique_labels_colors.items()]
-    ax.legend(handles=legend_handles, loc='center right')
-
-    path = os.path.join("./results/", filename)
-    plt.savefig(path, bbox_inches='tight')
 
 def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
     expernums = expernums_from_gils(gil_vals)
@@ -729,29 +664,28 @@ def make_fig3(vm_errors, act_errors):
 
 def make_fig4(t_plot, gils_plot):
     figsize = (27, 24)
+    gridspec_kw = {'hspace': 0.01, 'wspace': 0.01}
 
     plot_meshdata_vertical(ActMeshPlotData(),
                            VMMeshPlotData(t_plot),
                            gils_plot[::-1],
                            figsize,
+                           gridspec_kw,
                            "Fig4.svg")
 
 def make_fig5(t_plot, gils_plot):
     zoom = [55, 75, 15, 45]
-    figsize = (15, 20)
+    figsize = (35, 27)
+
+    gridspec_kw = {'hspace': 0.1, 'wspace': 0.1}
 
     plot_meshdata_vertical(ActMeshPlotData(),
                            VMMeshPlotData(t_plot),
                            gils_plot[::-1],
                            figsize,
-                           "Fig5_a.svg",
+                           gridspec_kw,
+                           "Fig5.svg",
                            zoom = zoom)
-
-    #plot_meshdata_vertical(VMMeshPlotData(t_plot),
-    #                       gils_plot[::-1],
-     #                      "Fig5_b.svg",
-      #                     zoom = zoom,
-       #                    figsize = figsize)
 
 if __name__ == "__main__":
     t_plot = 430
