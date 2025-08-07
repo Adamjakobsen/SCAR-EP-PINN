@@ -679,31 +679,31 @@ def make_fig3(vm_errors, act_errors):
                          "Fig3.svg")
 
 def make_fig4(vm_errors, act_errors, t_plot, gils_plot):
-    plot_meshdata_vertical(VMMeshPlotData(t_plot),
-                           gils_plot[::-1],
-                           "Fig4_a.svg")
-
     plot_meshdata_vertical(ActMeshPlotData(),
                            gils_plot[::-1],
-                           "Fig4_b.svg",
+                           "Fig4_a.svg",
                            trace_meshboundary = True)
+    
+    plot_meshdata_vertical(VMMeshPlotData(t_plot),
+                           gils_plot[::-1],
+                           "Fig4_b.svg")
 
 def make_fig5(t_plot, gils_plot):
     zoom = [55, 75, 15, 45]
     figsize = (15, 20)
 
-    plot_meshdata_vertical(VMMeshPlotData(t_plot),
+    plot_meshdata_vertical(ActMeshPlotData(),
                            gils_plot[::-1],
                            "Fig5_a.svg",
                            zoom = zoom,
-                           figsize = figsize)
+                           figsize = figsize,
+                           trace_meshboundary = True)
 
-    plot_meshdata_vertical(ActMeshPlotData(),
+    plot_meshdata_vertical(VMMeshPlotData(t_plot),
                            gils_plot[::-1],
                            "Fig5_b.svg",
                            zoom = zoom,
-                           figsize = figsize,
-                           trace_meshboundary = True)
+                           figsize = figsize)
 
 if __name__ == "__main__":
     t_plot = 430
