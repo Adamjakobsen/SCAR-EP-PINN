@@ -41,6 +41,5 @@ def main():
     torch.save(model.state_dict(), model_save_path)
     print(f"Model and config saved to: {experiment_dir}")
 
-
 if __name__ == "__main__":
     main()

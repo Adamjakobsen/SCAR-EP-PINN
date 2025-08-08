@@ -76,7 +76,6 @@ def set_plot_env():
 
 class MeshPlotData(object):
     def __init__(self, cmap, vmin, vmax):
-
         self.cmap = cmap
         self.vmin = vmin
         self.vmax = vmax
@@ -231,12 +230,12 @@ def plot_meshdata_vertical(actplotdata,
         ax_VmPINN = axs[i,2]
         ax_VmFEM = axs[i,3]
 
-        pcm_act = actplotdata.comparative_plot(ax_actFEM,
-                                               ax_actPINN,
+        pcm_act = actplotdata.comparative_plot(ax_actPINN,
+                                               ax_actFEM,
                                                expernum)
 
-        pcm_vm = vmplotdata.comparative_plot(ax_VmFEM,
-                                             ax_VmPINN,
+        pcm_vm = vmplotdata.comparative_plot(ax_VmPINN,
+                                             ax_VmFEM,
                                              expernum)
 
         #Add Mesh boundaries to Act data
@@ -671,6 +670,17 @@ def make_fig5(t_plot, gils_plot):
                            "Fig5.svg",
                            zoom = zoom)
 
+def get_error_dfs(vm_errors, act_errors):
+    Delta_vm_df = pd.DataFrame(np.array([EXPERIMENT_GILS, vm_errors]).T, columns = ["gils", "Delta_vm"])
+
+    Delta_at_df = pd.DataFrame(np.array([EXPERIMENT_GILS, act_errors]).T, columns = ["gils", "Delta_at"])
+
+    gil_sets = [get_dataset_label(gil) for gil in EXPERIMENT_GILS]
+    
+    Delta_vm_df["set"] = gil_sets
+    Delta_at_df["set"] = gil_sets
+    return Delta_vm_df, Delta_at_df
+
 if __name__ == "__main__":
     t_plot = 430
     gils_plot = [0.01, 0.02, 0.025, 0.1]
@@ -685,3 +695,8 @@ if __name__ == "__main__":
     #make_fig3(vm_errors, act_errors)
     make_fig4(t_plot, gils_plot)
     make_fig5(t_plot, gils_plot)
+
+    #For interactive analysis
+    Delta_vm_df, Delta_at_df = get_error_dfs(vm_errors, act_errors)
+
+    #from IPython import embed; embed()

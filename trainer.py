@@ -831,9 +831,6 @@ class PINNTrainer:
         self.X_collocation_train = torch.tensor(
             X_collocation_numpy, dtype=torch.float32, device=self.device)
 
-        
-            
-
 class CustomDataset(Dataset):
     def __init__(self, X, V, W, device):
         self.X = X

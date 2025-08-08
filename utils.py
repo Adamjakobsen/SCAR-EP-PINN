@@ -5,7 +5,6 @@ import h5py
 import logging
 from datetime import datetime
 
-
 def get_data():
     # Provide your custom HDF5 read logic or geometry load logic here.
     # This example is just a placeholder.
@@ -15,7 +14,6 @@ def get_data():
         triangles = scar_file["topology"][:]
     vm = np.zeros((1, len(coordinates)))  # dummy
     return coordinates, triangles, vm
-
 
 def get_boundary():
     # Provide logic to load your boundary mesh
@@ -36,11 +34,9 @@ def make_directory(config):
         os.makedirs(path_directory)
     return path_directory
 
-
 def save_config(config, path):
     with open(os.path.join(path, 'config.json'), 'w') as f:
         json.dump(config, f, indent=4)
-
 
 def setup_logger(log_file):
     logging.basicConfig(
