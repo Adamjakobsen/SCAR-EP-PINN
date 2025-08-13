@@ -27,9 +27,11 @@ SCAR-EP PINN is trained on data generated using the finite element method (FEM).
 from the Zenodo repository ....
 
 ## How to get the pretrained model weights and baises
+A pretrained model is available under
 
+`experiments/run_20250429_191929/final_model.pth`
 
 ## How to train the PINN from scratch yourself
-
+Todo - 
 
 
