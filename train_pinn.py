@@ -5,7 +5,6 @@ from datetime import datetime
 
 from utils import load_config, save_config
 from pinn import PINN2D
-from dataloader import DataModule
 from trainer import PINNTrainer
 
 def main():
@@ -29,12 +28,10 @@ def main():
     # 4) Instantiate the model
     model = PINN2D(config)
 
-    # 5) Prepare data
-    data_module = DataModule(config)
 
     # 6) Trainer
     trainer = PINNTrainer(model, config)
-    trainer.train(data_module)
+    trainer.train()
 
     # 7) Save final model weights
     model_save_path = os.path.join(experiment_dir, "model_final.pth")
