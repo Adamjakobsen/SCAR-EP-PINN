@@ -5,9 +5,6 @@
 Fig. 1: Overview of SCAR EP-PINN
 
 ## Dependencies 
-
->dataloader = 2.0
->
 >h5py = 3.10.0
 >
 >matplotlib = 3.5.1
@@ -32,6 +29,8 @@ A pretrained model is available under
 `experiments/run_20250429_191929/final_model.pth`
 
 ## How to train the PINN from scratch yourself
-Todo - 
+Run the training script
+
+> python3 train_pinn.py
 
 
