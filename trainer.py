@@ -36,7 +36,7 @@ class PINNTrainer:
             history_size=100
         )
 
-    def train(self, datamodule):
+    def train(self, ):
         """
         Coordinates the multi-phase training approach:
           1) Data pretraining
