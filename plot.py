@@ -80,7 +80,7 @@ class MeshPlotData(object):
         self.vmin = vmin
         self.vmax = vmax
 
-        self.vertices, self.triangles, _ = get_data()
+        self.vertices, self.triangles, _ = get_mesh_data()
         self.vertices *= 1e-3
 
         self.triang = tri.Triangulation(self.vertices[:,0], 
@@ -380,7 +380,7 @@ def calculate_inactivation_dice_coefficient(isnanFEM, isnanPINN):
 
 def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
     expernums = expernums_from_gils(gil_vals)
-    vertices, triangles, _ = get_data()
+    vertices, triangles, _ = get_mesh_data()
     # scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
     # scar_vertices = scar_vertices * 1e-3
@@ -518,7 +518,7 @@ def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
     
     expernums = expernums_from_gils(gil_vals)
 
-    vertices, triangles, _ = get_data()
+    vertices, triangles, _ = get_mesh_data()
     # scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
     vm_all = np.load("./data/vm_variation_scar_full.npy")

@@ -4,114 +4,106 @@ import torch.optim as optim
 import numpy as np
 
 
+
 class PINN2D(nn.Module):
     """
     A Physics-Informed Neural Network (PINN) for 2D Aliev-Panfilov model on MRI-geometry.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, mins, maxes):
         super(PINN2D, self).__init__()
+        print("Initializing PINN")
         self.config = config
         # Device check (CPU, MPS for Apple Silicon, or CUDA)
         self.device = self._choose_device()
 
-        # PDE constants
-        self.a = 0.15
-        self.k = 8.0
-        self.mu1 = 0.2
-        self.mu2 = 0.3
-        self.eps = 0.002
-        self.b = 0.15
-        self.vm_rest = torch.tensor(-80.0, dtype=torch.float32, device=self.device)
-        self.vm_norm = torch.tensor(100.0, dtype=torch.float32, device=self.device)
-        mins = np.array([-0.1090, -0.1275,  0.0000,  0.0184, -4.6778, -4.6778,  0.0184,  0.0100])
-        maxes = np.array([7.5614e1, 7.3461e1, 9.3023e1, 1.1352e1, 4.6778e0, 4.6778e0,
-        1.1352e+1, 7.5000e-2])
-        self.mins = torch.tensor(mins, dtype=torch.float32, device=self.device)
-        self.maxes = torch.tensor(maxes, dtype=torch.float32, device=self.device)
-        # Loss weights
-        w = config["TRAINING"]["weights_loss"]
-        self.w_pde = torch.tensor(w[0], dtype=torch.float32, device=self.device)
-        self.w_ode = torch.tensor(w[1], dtype=torch.float32, device=self.device)
-        self.w_bc = torch.tensor(w[2], dtype=torch.float32, device=self.device)
-        self.w_ic = torch.tensor(w[3], dtype=torch.float32, device=self.device)
-        self.w_data = torch.tensor(w[4], dtype=torch.float32, device=self.device)
+        mcfg = config["MODEL"]
 
-        # Network architecture
-        self.num_layers = config["TRAINING"]["n_layers"]
-        self.num_neurons = config["TRAINING"]["n_neurons"]
-        n_inputs = 8 if config["DATA"]["isotropic"] == 0 else 3
-        activation = self.config["TRAINING"]["activation"]
+        # features
+        self.n_in  = int(mcfg.get("in_features", 8))
+        self.n_out = int(mcfg.get("out_features", 2))
+        self.n_layers  = int(mcfg.get("n_layers", 9))
+        self.n_neurons = int(mcfg.get("n_neurons", 256))
+        activation = str(mcfg.get("activation", "tanh"))
+        activation_last = str(mcfg.get("activation_last", "silu"))
+        self.mins = mins
+        self.maxes = maxes
+
+        # physics constants
+        phys = mcfg.get("physics", {})
+        self.a   = float(phys.get("a", 0.15))
+        self.k   = float(phys.get("k", 8.0))
+        self.mu1 = float(phys.get("mu1", 0.2))
+        self.mu2 = float(phys.get("mu2", 0.3))
+        self.eps = float(phys.get("eps", 0.002))
+        self.b   = float(phys.get("b", 0.15))
+        self.h   = float(phys.get("h", 0.1))
+        self.beta = float(phys.get("beta", 1.4e-5))
+        self.Cm   = float(phys.get("Cm", 1e-3))
+        self.mS_cm = float(phys.get("mS_cm", 10.0))
+        self.vm_rest = float(phys.get("vm_rest", -80.0))  # mV
+        self.vm_norm = float(phys.get("vm_norm", 100.0))
+
+        # loss weights (used by your loss aggregation)
+        lw = mcfg.get("loss_weights", {})
+        self.w_pde  = float(lw.get("w_pde", 0.01))
+        self.w_ode  = float(lw.get("w_ode", 0.01))
+        self.w_bc   = float(lw.get("w_bc",  0.01))
+        self.w_ic   = float(lw.get("w_ic",  1.0))
+        self.w_data = float(lw.get("w_data",1.0))
+
         if activation == "tanh":
             activation = nn.Tanh()
         elif activation == "silu":
             activation = nn.SiLU()
-        elif activation == "gelu":
-            activation = nn.GELU()
-
-        activation_last = self.config["TRAINING"]["activation_last"]
+        
         if activation_last == "tanh":
             activation_last = nn.Tanh()
         elif activation_last == "silu":
             activation_last = nn.SiLU()
-        elif activation_last == "gelu":
-            activation_last = nn.GELU()
-        # Initialise weights glorot/xavier uniform
-        num_first = self.config["TRAINING"]["num_first"]
-        num_last = self.config["TRAINING"]["num_last"]
+
+        
+
         a = torch.ones_like(self.maxes)*(-1)
         b = torch.ones_like(self.maxes)*1
         # Construct model
         layers = []
-        # Normalization "layer" (by default, identity initialization)
-        self.layer_norm = nn.Linear(n_inputs, n_inputs, dtype=torch.float32)
+        # Scaling layer
+        self.layer_norm = nn.Linear(self.n_in, self.n_in, dtype=torch.float32)
 
         self.weight_scale = (b-a)/(self.maxes-self.mins)
-        #self.weight_scale[-1] = 1
-        # torch.ones_like(self.maxes)
+
         self.bias_scale = (-self.mins*(b-a))/(self.maxes-self.mins)+a
-        #self.bias_scale[-1] = 0
+
         self.layer_norm.weight.data = torch.diag(self.weight_scale)
         self.layer_norm.bias.data = self.bias_scale
-        # self.layer_norm.weight.data = torch.diag(1/self.stds)
-        # self.layer_norm.bias.data = -self.means/self.stds
+
         # freeze layer
         for param in self.layer_norm.parameters():
             param.requires_grad = False
         layers = [self.layer_norm]
 
-        layers += [nn.Linear(n_inputs, num_first,
+        layers += [nn.Linear(self.n_in, self.n_neurons,
                              dtype=torch.float32)]
-        for l in range(self.num_layers):
-            if l == 0:
-                layers += [nn.Linear(num_first,
-                                     num_first, dtype=torch.float32), activation]
+        for l in range(self.n_layers):
 
-            elif l == 1:
-                layers += [nn.Linear(num_first,
-                                     self.num_neurons, dtype=torch.float32), activation]
-
-            # elif l == 2:
-            #    layers += [nn.Linear(self.num_neurons,
-            #                         self.num_neurons), nn.SiLU()]
-            #    print("Silu activation added")
-            elif l == 3:
-                layers += [nn.Linear(self.num_neurons,
-                                     self.num_neurons, dtype=torch.float32), activation]
-            elif l == self.num_layers-1:
-                layers += [nn.Linear(self.num_neurons,
-                                     num_last, dtype=torch.float32), activation_last]
+            if l == self.n_layers-1:
+                layers += [nn.Linear(self.n_neurons,
+                                     self.n_neurons, dtype=torch.float32), activation_last]
             else:
-                layers += [nn.Linear(self.num_neurons,
-                                     self.num_neurons, dtype=torch.float32), activation]
+                layers += [nn.Linear(self.n_neurons,
+                                     self.n_neurons, dtype=torch.float32), activation]
 
-        layers += [nn.Linear(num_last, 2, dtype=torch.float32)]
+        layers += [nn.Linear(self.n_neurons, 2, dtype=torch.float32)]
 
         self.model = nn.Sequential(*layers).to(self.device)
         self._initialize_weights()
-        if config["TRAINING"]["multi_gpu"]:
-            gpu_list = config["TRAINING"]["gpu_list"]
-            self.model = nn.DataParallel(self.model, device_ids=gpu_list)
+
+        # Multi-GPU support (CUDA only)
+        dcfg = config.get("DEVICE", {})
+        if dcfg.get("multi_gpu", False) and torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            ids = dcfg.get("gpu_list") or list(range(torch.cuda.device_count()))
+            self.model = torch.nn.DataParallel(self.model, device_ids=ids)
         #print architecture
         print("PINN2D architecture:")
         print(self.model)

@@ -3,13 +3,13 @@ import argparse
 import os
 from datetime import datetime
 
-from utils import load_config, save_config
+from utils import load_config, save_config_yaml
 from pinn import PINN2D
 from trainer import PINNTrainer
-
+from scar_data_module import ScarPINNDataModule
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
+    parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     args = parser.parse_args()
 
     # 1) Load config
@@ -23,18 +23,20 @@ def main():
     config["path_directory"] = experiment_dir
     # 3) Save the config inside that folder
     #    (This ensures you have a record of the hyperparameters used)
-    save_config(config, experiment_dir)
-
+    save_config_yaml(config, experiment_dir)
+    dm = ScarPINNDataModule(config)
+    dm.setup_data()
+    min, max = dm.get_minmax_tensors()
     # 4) Instantiate the model
-    model = PINN2D(config)
+    model = PINN2D(config, min, max)
 
 
     # 6) Trainer
-    trainer = PINNTrainer(model, config)
+    trainer = PINNTrainer(model,dm, config)
     trainer.train()
 
     # 7) Save final model weights
-    model_save_path = os.path.join(experiment_dir, "model_final.pth")
+    model_save_path = os.path.join(experiment_dir, "final_model.pth")
     torch.save(model.state_dict(), model_save_path)
     print(f"Model and config saved to: {experiment_dir}")
 
