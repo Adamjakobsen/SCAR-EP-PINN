@@ -1,24 +1,4 @@
-"""
-scar_data_module.py
 
-A data loader module tailored to your existing `trainer.setup_data` logic.
-It encapsulates the full data construction (train loader, test tensors,
-boundary/collocation/IC arrays) and computes column-wise min/max over the
-**training design matrix** `(x,y,t,sig_a,sig_b,sig_c,sig_d,g_il)`.
-
-Usage (before creating the PINN):
-
-    dm = ScarPINNDataModule(config, dataset_class=CustomDataset)
-    dm.setup_data()
-    mins, maxes = dm.get_minmax_tensors()
-
-    model = PINN2D(config).to(dm.device)
-    # Your scaling layer should expose a setter; e.g.:
-    model.scaler.set_stats(mins, maxes)
-    # ...then proceed to train using dm.dataloader, etc.
-
-This removes any hard-coded min/max values from the model.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from utils import get_mesh_data, get_boundary  # used by setup_data
+from utils import get_mesh_data, get_boundary 
 
 
 # -----------------------------
@@ -110,7 +90,7 @@ class ScarPINNDataModule:
         - boundary arrays (for BC)
         - collocation arrays (for PDE)
         - initial-condition arrays (for IC)
-        - input min/max tensors (computed from the training design matrix)
+        - input min/max tensors (computed from the training data)
         """
         # -----------------
         # Device
@@ -319,7 +299,7 @@ class ScarPINNDataModule:
         self.v_flat_numpy = np.zeros((vm_train.shape[0] * vm_train.shape[1] * vm_train.shape[2], 1))
         self.W_flat_numpy = np.zeros((W_train.shape[0] * W_train.shape[1] * W_train.shape[2], 1))
 
-        # Collocation features (over selected experiments)
+        # Collocation features 
         for i in range(conductivities_collocation.shape[3]):
             start = i * vm_train.shape[0] * vm_train.shape[1]
             end = (i + 1) * vm_train.shape[0] * vm_train.shape[1]
@@ -428,7 +408,7 @@ class ScarPINNDataModule:
         self.W_ic_train = torch.tensor(self.W_ic_all_numpy[idx_ic], dtype=torch.float32, device=self.device)
 
         # -----------------
-        # Main supervised dataset (full features; you can subsample if desired)
+        # Data 
         # -----------------
         self.X_data_train_cpu = torch.tensor(self.features_all_numpy, dtype=torch.float32)
         self.V_data_train_cpu = torch.tensor(self.v_flat_numpy, dtype=torch.float32)
@@ -449,7 +429,7 @@ class ScarPINNDataModule:
         self.W_test = torch.tensor(W_test, dtype=torch.float32, device=self.device)
 
         # -----------------
-        # Min/Max over training design matrix (remove hardcoding)
+        # Min/Max over training data 
         # -----------------
         maxes_numpy = self.features_all_numpy.max(axis=0)
         mins_numpy = self.features_all_numpy.min(axis=0)
@@ -457,16 +437,14 @@ class ScarPINNDataModule:
         self.mins = torch.tensor(mins_numpy, dtype=torch.float32, device=self.device)
 
 
-    # -----------------
-    # Helper API
-    # -----------------
+
     def get_minmax_tensors(self) -> Tuple[torch.Tensor, torch.Tensor]:
         assert self.mins is not None and self.maxes is not None, "Call setup_data() first."
         return self.mins, self.maxes
 
     @torch.no_grad()
     def resample(self):
-        """Resample collocation set (kept identical to your original method)."""
+        """Resample collocation set """
         idx_colocation = np.random.choice(self.features_collocation.shape[0], self.num_domain, replace=False)
         X_collocation_numpy = self.features_collocation[idx_colocation]
         self.X_collocation_train = torch.tensor(X_collocation_numpy, dtype=torch.float32, device=self.device)

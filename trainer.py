@@ -1,4 +1,4 @@
-# trainer.py
+
 from __future__ import annotations
 
 import os
@@ -84,7 +84,7 @@ class PINNTrainer:
         os.makedirs(self.out_dir, exist_ok=True)
 
     # -------------------------------------------------------------------------
-    # Data acquisition (delegated to DataModule) + scaler injection
+    # Data acquisition 
     # -------------------------------------------------------------------------
     def setup_data(self) -> None:
         """

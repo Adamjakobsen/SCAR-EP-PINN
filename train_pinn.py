@@ -22,7 +22,6 @@ def main():
     #Add experiment_dir to config
     config["path_directory"] = experiment_dir
     # 3) Save the config inside that folder
-    #    (This ensures you have a record of the hyperparameters used)
     save_config_yaml(config, experiment_dir)
     dm = ScarPINNDataModule(config)
     dm.setup_data()

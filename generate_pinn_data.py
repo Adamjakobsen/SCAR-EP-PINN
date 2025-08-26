@@ -4,12 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Tuple
-
+from scar_data_module import ScarPINNDataModule
 import numpy as np
 import torch
 
 from pinn import PINN2D as PINN
-from utils import get_data, get_boundary, load_config
+from utils import get_mesh_data, get_boundary, load_config
 
 # -----------------------------
 # Constants & configuration
@@ -44,7 +44,7 @@ class Geometry:
 # -----------------------------
 
 def load_geometry() -> Geometry:
-    vertices, triangles, _ = get_data()
+    vertices, triangles, _ = get_mesh_data()
     vertices = vertices * XY_MICRO_TO_MILLI
     return Geometry(vertices=vertices, triangles=triangles)
 
@@ -111,7 +111,6 @@ def pinn_activation_times(
             idx = np.where(not_activated)[0]
             n_curr = idx.size
             # Construct [x, y, t, sigma_a, sigma_b, sigma_c, sigma_d, exp]
-            # The experiment indicator is appended outside this function by caller
             t_col = np.full((n_curr, 1), t_current, dtype=np.float32)
             data = np.hstack((base_features[idx, :2], t_col, base_features[idx, 2:]))
             data_tensor = torch.tensor(data, dtype=torch.float32, device=device)
@@ -125,10 +124,6 @@ def pinn_activation_times(
 
     return act_times
 
-
-# -----------------------------
-# Public APIs
-# -----------------------------
 
 def get_activation_data(
     pinn: PINN,
@@ -164,12 +159,9 @@ def get_activation_data(
 
         # Base spatial features for PINN (without time and exp columns)
         base = np.column_stack((x, y, sigma_a, sigma_b, sigma_c, sigma_d)).astype(np.float32)
-        # Append experiment indicator as an extra column to base_features for efficiency
+        # Append experiment indicator as an extra column to base_features 
         exp_col = np.full((n_vertices, 1), G_IL_VALUES[exp_idx], dtype=np.float32)
-        base_with_exp = np.hstack((base, exp_col))  # (V, 7) but pinn_activation_times expects (V, 6)
-        # Internally we ignore the last column and tack exp in the caller loop below per-batch
-
-        # We incorporate exp inside the batched input (same value for all rows)
+        base_with_exp = np.hstack((base, exp_col))  
         def pinn_act_times_for_exp() -> np.ndarray:
             act_times = np.full(n_vertices, np.nan, dtype=float)
             not_activated = np.ones(n_vertices, dtype=bool)
@@ -251,17 +243,19 @@ def get_v_data(pinn: PINN) -> np.ndarray:
     return V_PINN
 
 
-# -----------------------------
-# Script entry point
-# -----------------------------
+
 if __name__ == "__main__":
     experiment_path = Path("./experiments/run_20250429_191929")
-    config_path = experiment_path / "config.json"
+    config_path = experiment_path / "config.yaml"
     config = load_config(str(config_path))
+    dm = ScarPINNDataModule(config)
+    dm.setup_data()
+    min, max = dm.get_minmax_tensors()
+    # 4) Instantiate the model
+    
 
-
-    pinn = PINN(config)
-    model_path = Path("/Users/adam/SCAR_PINN/experiments/run_20250429_191929/model_Adam_epoch_5.pth")
+    pinn = PINN(config, min, max)
+    model_path = experiment_path / "final_model.pth"
 
 
     # Detect device: prefer CUDA, then MPS, then CPU

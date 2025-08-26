@@ -162,7 +162,7 @@ class PINN2D(nn.Module):
         sigma_b = x_collocation[:, 4:5].requires_grad_()
         sigma_c = x_collocation[:, 5:6].requires_grad_()
         sigma_d = x_collocation[:, 6:7].requires_grad_()
-        experiment = x_collocation[:, 7:8]  # not used in grads, but kept for indexing
+        experiment = x_collocation[:, 7:8] 
 
         y_pred = self.forward(
             torch.cat([x_space, y_space, t_space, sigma_a, sigma_b, sigma_c, sigma_d, experiment], dim=1)
