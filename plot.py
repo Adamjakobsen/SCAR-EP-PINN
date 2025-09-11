@@ -9,6 +9,12 @@ import numpy.ma as ma
 import seaborn as sns
 import os
 import pandas as pd
+from pinn import PINN2D as PINN
+from utils import get_mesh_data, get_boundary, load_config
+from scar_data_module import ScarPINNDataModule
+import numpy as np
+import torch
+
 
 EXPERIMENT_GILS = np.linspace(0.01, 0.1, 19)
 DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06, 0.07, 0.075, 0.08],
@@ -16,6 +22,21 @@ DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06,
               "extrapolation": [0.085, 0.09, 0.095, 0.1]}
 
 ACT_LEVELS = 15
+EXPERIMENT_DIR="/work/adam2/SCAR-EP-PINN/experiments/run_20250909_193150"
+RESULTS_DIR = "./results"
+ANIM_OUTDIR = os.path.join(RESULTS_DIR, "animations")
+ANIM_CODEC = "libx264"
+BITRATE=1000
+FILE_extension = ".png"  # 
+
+COND_PATH = Path("./data/conductivities_variation_scar_full.npy")
+VM_FEM_PATH = Path("./data/vm_variation_scar_full.npy")
+
+#Constants
+DT_MS = 5.0                    # time step in ms
+TIME_NORMALIZER = 12.9         # Time Units (TU) in ms, as in Aliev-Panfilov model
+COND_SCALE = 12.9 / 1.4        # to convert conductivities from S/m to mm^2/TU 
+XY_MICRO_TO_MILLI = 1e-3
 
 def expernums_from_gils(gil_vals):
     return [np.where(np.isclose(EXPERIMENT_GILS, gil))[0][0] for gil in gil_vals]
@@ -321,7 +342,7 @@ def plot_meshdata_vertical(actplotdata,
 
     #add_cbar_to_plotgrids(fig, axs, pcm, plotdata.cbar_label)
 
-    plt.savefig(f"./results/{filename}",
+    plt.savefig(f"{RESULTS_DIR}/{filename}{FILE_extension}",
                  bbox_inches='tight') #dpi=300
     plt.close(fig)
 
@@ -385,12 +406,12 @@ def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
     vertices = vertices * 1e-3
     # scar_vertices = scar_vertices * 1e-3
 
-    vm_all = np.load("./data/vm_variation_scar_full.npy")
+    V_FEM = np.load("./data/vm_variation_scar_full.npy")
     activation_FEM_all = np.load("./data/activations_all_FEM.npy")
     
     x = vertices[:, 0]
     y = vertices[:, 1]
-    n_timepoints = vm_all.shape[0]
+    n_timepoints = V_FEM.shape[0]
     dt = 5
     t_start = 0
     t_end = (n_timepoints - 1) * dt
@@ -442,7 +463,7 @@ def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
         # Plot
         ax_V = axs_grid[1, :].flatten()[i]
         # Plot Vm
-        v = vm_all[:, :, expernum]
+        v = V_FEM[:, :, expernum]
         v = v[int(t_plot/5), :]
 
         V_plot = ax_V.tripcolor(triang_v,
@@ -507,7 +528,7 @@ def plot_fem_data(t_plot, gil_vals, filename, zoom) -> None:
         axs_grid[1, 0].add_patch(rect)
     # Extend
     # plt.ylim(np.min(vertices[:, 1]), np.max(vertices[:, 1])+1)
-    plt.savefig(f"./results/{filename}", bbox_inches='tight')
+    plt.savefig(f"{RESULTS_DIR}/{filename}{FILE_extension}", bbox_inches='tight')
     plt.close(fig)
 
 def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
@@ -521,7 +542,7 @@ def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
     vertices, triangles, _ = get_mesh_data()
     # scar_vertices = np.load("./data/gregion3_coordinates.npy")
     vertices = vertices * 1e-3
-    vm_all = np.load("./data/vm_variation_scar_full.npy")
+    V_FEM = np.load("./data/vm_variation_scar_full.npy")
     triang = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
 
     # plot 4 experiments at t_plot
@@ -530,7 +551,7 @@ def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
     positions = range(len(gil_vals))
 
     for i, expernum, gil_val in zip(positions, expernums, gil_vals):
-        v = vm_all[:, :, expernum]
+        v = V_FEM[:, :, expernum]
         v = v[int(t_plot/5), :]
         if i == 0:
             ax_index_x = 0
@@ -581,7 +602,7 @@ def plot_fem_zoom(t_plot, gil_vals, zoom, filename) -> None:
     cbar_ax = fig.add_axes([0.95, 0.15, 0.04, 0.7])
     fig.colorbar(V_plot, cax=cbar_ax, label=r"$V_{m}$ [mV]")
     
-    fig.savefig(f"./results/{filename}",
+    fig.savefig(f"{RESULTS_DIR}/{filename}{FILE_extension}",
                 bbox_inches='tight')
 
 def plot_combined_errors(act_errors, vm_errors, filename):
@@ -624,7 +645,7 @@ def plot_combined_errors(act_errors, vm_errors, filename):
                   bbox_to_anchor=(1.05, 0.5),
                   title="Dataset")
 
-    plt.savefig(f"./results/{filename}",
+    plt.savefig(f"{RESULTS_DIR}/{filename}{FILE_extension}",
                 bbox_inches='tight')
 
 def make_fig2(t_plot, gils_plot):
@@ -632,18 +653,18 @@ def make_fig2(t_plot, gils_plot):
     
     plot_fem_data(t_plot,
                   gils_plot,
-                  "Fig2_a.svg",
+                  "Fig2_a",
                   zoom)
 
     plot_fem_zoom(t_plot,
                   gils_plot,
                   zoom,
-                  "Fig2_c.svg")
+                  "Fig2_c")
 
 def make_fig3(vm_errors, act_errors):
     plot_combined_errors(act_errors, 
                          vm_errors,
-                         "Fig3.svg")
+                         "Fig3")
 
 def make_fig4(t_plot, gils_plot):
     figsize = (27, 24)
@@ -654,7 +675,7 @@ def make_fig4(t_plot, gils_plot):
                            gils_plot[::-1],
                            figsize,
                            gridspec_kw,
-                           "Fig4.svg")
+                           "Fig4")
 
 def make_fig5(t_plot, gils_plot):
     zoom = [55, 75, 15, 45]
@@ -681,6 +702,330 @@ def get_error_dfs(vm_errors, act_errors):
     Delta_at_df["set"] = gil_sets
     return Delta_vm_df, Delta_at_df
 
+# ---------- Animations  ----------
+
+
+def _ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+def _triangulation_from_utils():
+    vertices, triangles, _ = get_mesh_data()
+    vertices = vertices * 1e-3
+    triang = tri.Triangulation(vertices[:, 0], vertices[:, 1], triangles)
+    return vertices, triang
+
+def _apply_axes_style(ax, zoom):
+    if zoom is not None:
+        ax.set_ylim(zoom[0], zoom[1])
+        ax.set_xlim(zoom[2], zoom[3])
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_aspect("equal")
+
+def animation_PINN_FEM(exp_idx,
+                       *,
+                       zoom=None,
+                       fps=20,
+                       bitrate=BITRATE,
+                       filename=None):
+    """
+    Side-by-side animation of PINN vs FEM for experiment index exp_idx.
+    Uses saved arrays: ./data/vm_PINN.npy and ./data/vm_variation_scar_full.npy
+    """
+    _ensure_dir(ANIM_OUTDIR)
+    vertices, triang = _triangulation_from_utils()
+
+    v_FEM_all  = np.load("./data/vm_variation_scar_full.npy")  # (T, V, E)
+    v_PINN_all = np.load("./data/vm_PINN.npy")                  # (T, V, E)
+
+    v_FEM  = v_FEM_all[:, :, exp_idx]
+    v_PINN = v_PINN_all[:, :, exp_idx]
+    g_il = EXPERIMENT_GILS[exp_idx]
+
+    T_len, V_count = v_FEM.shape
+    assert v_PINN.shape == (T_len, V_count)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
+
+    im1 = ax1.tripcolor(triang, v_PINN[0, :], shading="gouraud", cmap=plt.cm.cividis, vmin=-80, vmax=20)
+    im2 = ax2.tripcolor(triang, v_FEM[0,  :], shading="gouraud", cmap=plt.cm.cividis, vmin=-80, vmax=20)
+
+
+    cbar = fig.colorbar(im2, ax=[ax1, ax2],  # span both axes
+                    orientation="vertical",
+                    fraction=0.046, pad=0.04)
+    cbar.set_label(r"$V_m$ [mV]")
+    _apply_axes_style(ax1, zoom)
+    _apply_axes_style(ax2, zoom)
+    ax1.set_title(r"$\bf{PINN}$: $g_{il}$="+f"{g_il:.3f}S/m", fontsize=20)
+    ax2.set_title(r"$\bf{FEM}$: $g_{il}$="+f"{g_il:.3f}S/m",  fontsize=20)
+
+    def update(frame):
+        v_pred = v_PINN[frame, :]
+        v_true = v_FEM[frame,  :]
+
+        im1.set_array(v_pred)
+        im2.set_array(v_true)
+
+        # Per-frame RL1 (consistent with your older title behavior)
+        denom = np.sum(np.abs(v_true))
+        RL1 = (np.sum(np.abs(v_true - v_pred)) / denom) if denom > 0 else np.nan
+
+        ax1.set_title(r"$\bf{PINN}$: $g_{il}$="+f"{g_il:.3f}S/m" + f"\n t={frame*5:.0f} ms, RL1={RL1:.3f}", fontsize=20)
+        ax2.set_title(r"$\bf{FEM}$: $g_{il}$="+f"{g_il:.3f}S/m"  + f"\n t={frame*5:.0f} ms",               fontsize=20)
+        return im1, im2
+
+    ani = animation.FuncAnimation(fig, update, frames=T_len, interval=1, blit=False)
+
+    if filename is None:
+        filename = f"S{exp_idx+1}_vm_pinn_fem_gil_{g_il:.3f}.mp4"
+    outpath = os.path.join(ANIM_OUTDIR, filename)
+    ani.save(outpath, writer=animation.FFMpegWriter(fps=fps, codec=ANIM_CODEC, bitrate=bitrate))
+    plt.close(fig)
+
+
+def animation_PINN(exp_idx,
+                   *,
+                   zoom=None,
+                   fps=20,
+                   bitrate=BITRATE,
+                   filename=None):
+    """
+    PINN-only animation for experiment index exp_idx.
+    """
+    _ensure_dir(ANIM_OUTDIR)
+    vertices, triang = _triangulation_from_utils()
+
+    v_PINN_all = np.load("./data/vm_PINN.npy")  # (T, V, E)
+    v_PINN = v_PINN_all[:, :, exp_idx]
+    T_len, _ = v_PINN.shape
+    g_il = EXPERIMENT_GILS[exp_idx]
+    
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+    im = ax.tripcolor(triang, v_PINN[0, :], shading="gouraud", cmap=plt.cm.cividis, vmin=-80, vmax=20)
+    plt.colorbar(im, ax=ax, label=r"$V_m$ [mV]")
+    _apply_axes_style(ax, zoom)
+    ax.set_title(r"$\bf{PINN}$: $g_{il}$="+f"{g_il:.3f}S/m", fontsize=20)
+
+    def update(frame):
+        im.set_array(v_PINN[frame, :])
+        ax.set_title(r"$\bf{PINN}$: $g_{il}$="+f"{g_il:.3f}S/m" + f"\n t={frame*5:.0f} ms", fontsize=20)
+        return im,
+
+    ani = animation.FuncAnimation(fig, update, frames=T_len, interval=1, blit=False)
+
+    if filename is None:
+        filename = f"S{exp_idx+1}_vm_pinn_gil_{g_il:.3f}.mp4"
+    outpath = os.path.join(ANIM_OUTDIR, filename)
+    ani.save(outpath, writer=animation.FFMpegWriter(fps=fps, codec=ANIM_CODEC, bitrate=bitrate))
+    plt.close(fig)
+
+
+def animation_FEM(exp_idx,
+                  *,
+                  zoom=None,
+                  fps=20,
+                  bitrate=BITRATE,
+                  filename=None):
+    """
+    FEM-only animation for experiment index exp_idx.
+    """
+    _ensure_dir(ANIM_OUTDIR)
+    vertices, triang = _triangulation_from_utils()
+
+    v_FEM_all = np.load("./data/vm_variation_scar_full.npy")  # (T, V, E)
+    v_FEM = v_FEM_all[:, :, exp_idx]
+    T_len, _ = v_FEM.shape
+    g_il = EXPERIMENT_GILS[exp_idx]
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+    im = ax.tripcolor(triang, v_FEM[0, :], shading="gouraud", cmap=plt.cm.cividis, vmin=-80, vmax=20)
+    plt.colorbar(im, ax=ax, label=r"$V_m$ [mV]")
+    _apply_axes_style(ax, zoom)
+    ax.set_title(r"$\bf{FEM}$: $g_{il}$="+f"{g_il:.3f}S/m", fontsize=20)
+
+    def update(frame):
+        im.set_array(v_FEM[frame, :])
+        ax.set_title(r"$\bf{FEM}$: $g_{il}$="+f"{g_il:.3f}S/m" + f"\n t={frame*5:.0f} ms", fontsize=20)
+        return im,
+
+    ani = animation.FuncAnimation(fig, update, frames=T_len, interval=1, blit=False)
+
+    if filename is None:
+        filename = f"S{exp_idx+1}_vm_fem_gil_{g_il:.3f}.mp4"
+    outpath = os.path.join(ANIM_OUTDIR, filename)
+    ani.save(outpath, writer=animation.FFMpegWriter(fps=fps, codec=ANIM_CODEC, bitrate=bitrate))
+    plt.close(fig)
+
+
+
+def make_animations(gil_vals=None, zoom=None):
+    """
+    If gil_vals is None, animates all experiments. Otherwise accepts a list of g_il values.
+    """
+    if gil_vals is None:
+        exp_indices = range(len(EXPERIMENT_GILS))
+    else:
+        exp_indices = expernums_from_gils(gil_vals)
+
+    for exp_idx in exp_indices:
+        print(f"Animating experiment index {exp_idx}")
+        animation_PINN_FEM(exp_idx, zoom=zoom)
+        animation_PINN(exp_idx, zoom=zoom)
+        animation_FEM(exp_idx,  zoom=zoom)
+
+def get_v_data(pinn: PINN,epoch) -> np.ndarray:
+    """Compute PINN voltage predictions V_PINN with shape (T, V, E)."""
+    vertices, triangles, _ = get_mesh_data()
+    vertices = vertices * XY_MICRO_TO_MILLI
+    V_FEM = np.load(VM_FEM_PATH)  
+    cond_all = np.load(COND_PATH)* COND_SCALE
+
+    device = pinn.device
+    x = vertices[:, 0]
+    y = vertices[:, 1]
+
+    T_len, V_count, E_count = V_FEM.shape
+    n_timepoints = V_FEM.shape[0]
+    t_start = 0.0
+    t_end = (n_timepoints - 1) * DT_MS
+    t=np.linspace(t_start, t_end, n_timepoints) / TIME_NORMALIZER
+    V_PINN = np.zeros_like(V_FEM)
+    exp_indexes=[3,18,17,16,15]
+    g_il_vals = EXPERIMENT_GILS[exp_indexes]
+    errors = np.zeros((5, ))  # (E, T, V)
+    i=0
+    with torch.no_grad():
+        for exp_idx, g_il in zip(exp_indexes, g_il_vals):
+            print(f"Experiment {exp_idx}")
+            conductivities = cond_all[:, :, :, exp_idx]
+            sigma_a = conductivities[:, 0, 0]
+            sigma_b = conductivities[:, 0, 1]
+            sigma_c = conductivities[:, 1, 0]
+            sigma_d = conductivities[:, 1, 1]
+
+            # Base per-vertex features
+            base = np.column_stack((x, y, sigma_a, sigma_b, sigma_c, sigma_d)).astype(np.float32)
+            # Compute predictions for one timepoint at a time for memory efficiency
+            for ti, t_curr in enumerate(t):
+                t_col = np.full((V_count, 1), t_curr, dtype=np.float32)
+                exp_col = np.full((V_count, 1), g_il, dtype=np.float32)
+                data = np.hstack((base[:, :2], t_col, base[:, 2:], exp_col))  # (V, 8)
+                data_tensor = torch.tensor(data, dtype=torch.float32, device=device)
+                v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
+                V_PINN[ti, :, exp_idx] = v_pred
+
+            # Optional diagnostics
+            v_true = V_FEM[:, :, exp_idx]
+            abs_sum = np.sum(np.abs(v_true - V_PINN[:, :, exp_idx]))
+            v_sum = np.sum(np.abs(v_true))
+            errors[i] = abs_sum / v_sum
+            i+=1
+            
+            print("L1 relative error:", abs_sum / v_sum)
+            
+    
+
+    return errors
+
+def plot_error_epochs():
+
+    
+    experiment_path =EXPERIMENT_DIR
+    config_path = experiment_path + "/config.yaml"
+    config = load_config(str(config_path))
+
+    n_epochs_data = config["OPTIM"]["phase1"]["epochs"]
+    n_epochs_physics = config["OPTIM"]["phase2"]["epochs"]
+    n_epochs = n_epochs_data + n_epochs_physics
+    dm = ScarPINNDataModule(config)
+    dm.setup_data()
+    min, max = dm.get_minmax_tensors()
+    
+    error = np.zeros((5,n_epochs))
+    avg_error = np.zeros(n_epochs)  
+    pinn = PINN(config, min, max)
+
+    for i in range(1,n_epochs+1):
+        print(f"##########################Epoch {i}################################")
+        
+        if i <= n_epochs_data:
+            model_name = f"/model_data_epoch_{i}.pth"
+            print(f"Loading model from data phase: {model_name}")
+        else:
+            model_name = f"/model_Adam_epoch_{i-n_epochs_data}.pth"
+            print(f"Loading model from physics phase: {model_name}")
+        model_path = experiment_path + model_name
+
+        # Detect device: prefer CUDA, then MPS, then CPU
+        if torch.cuda.is_available():
+            map_location = torch.device("cuda")
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            map_location = torch.device("mps")
+        else:
+            map_location = torch.device("cpu")
+
+
+        state_dict = torch.load(str(model_path), map_location=map_location)
+        pinn.load_state_dict(state_dict)
+        pinn.eval()
+
+
+        
+
+
+
+        
+        error[:,i-1] = get_v_data(pinn,i)
+        avg_error[i-1] = np.mean(error[:,i-1])
+
+    
+    exp_indexes=[3,18,17,16,15]
+    for i,g_il in enumerate(EXPERIMENT_GILS[exp_indexes]):
+        print(f"Experiment {i} G_il={g_il}: Relative L1 Error: {error[i,:]}")
+        plt.plot(np.arange(1,n_epochs+1), error[i,:], label=f"G_il={g_il}")
+
+    plt.plot(np.arange(1,n_epochs+1), avg_error, label=f"Average", color='black', linewidth=2, linestyle='--')
+
+    plt.axvline(x=n_epochs_data, color='red', linestyle='--', label='Physics start')
+    
+    plt.xlabel("Epoch")
+    plt.ylabel("Relative L1 Error")
+    plt.yscale('log')
+    plt.title("Relative L1 Error vs Epoch for Different G_il Values")
+    plt.legend()
+    figname=f"/l1_errors_epoch{FILE_extension}"
+    plt.savefig(RESULTS_DIR + figname)
+
+def moving_average(data, window_size):
+    return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
+def plot_loss():
+    experiment_path=EXPERIMENT_DIR
+    losses = np.load(f"{experiment_path}/losses.npy")
+    losses_test=np.load(f"{experiment_path}/losses_test.npy")
+    iteration_list = losses[:,0]
+    window_size = 2000
+    loss_mse_smooth = moving_average(losses[:,1], window_size)
+    loss_mse_test_smooth = moving_average(losses_test[:,1], window_size)
+    MSE_test_min_iteration = iteration_list[np.argmin(losses_test[:,1])]
+    plt.plot(iteration_list, losses[:,1],color='gray', alpha=0.7, label=f"MSE")
+
+    plt.plot(iteration_list, losses_test[:,1],color='lightgreen', alpha=0.7, label=f"MSE test")
+    plt.plot(iteration_list[:-window_size], loss_mse_test_smooth[:-1],color='green', label=f"MSE test smooth")
+    plt.plot(iteration_list[:-window_size], loss_mse_smooth[:-1],color='black', label=f"MSE smooth")
+    
+    plt.scatter(MSE_test_min_iteration, np.min(losses_test[:,1]), color='red', label="Min MSE test")
+    plt.yscale('log')
+    #x axis label
+    plt.xlabel("Iteration")
+    #y axis label
+    plt.ylabel("MSE")
+    #title
+    plt.title("Training and Validation Loss")
+    #save figure
+    plt.savefig(f"{RESULTS_DIR}/losses{FILE_extension}")
+
+
 if __name__ == "__main__":
     t_plot = 430
     gils_plot = [0.01, 0.02, 0.025, 0.1]
@@ -688,13 +1033,20 @@ if __name__ == "__main__":
     vm_errors = get_vm_errordata()
     act_errors, inact_df = get_act_errordata()
 
-    with open("./results/inactivation_data.txt", "w") as f:
+    with open(f"{RESULTS_DIR}/inactivation_data.txt", "w") as f:
         f.write(inact_df.dropna().to_latex())
-
+    #Figures
     #make_fig2(t_plot, gils_plot)
     #make_fig3(vm_errors, act_errors)
-    make_fig4(t_plot, gils_plot)
-    make_fig5(t_plot, gils_plot)
+    #make_fig4(t_plot, gils_plot)
+    #make_fig5(t_plot, gils_plot)
+    
+    #Animations
+    #make_animations()
+
+    #Loss 
+    plot_loss()
+    plot_error_epochs()
 
     #For interactive analysis
     Delta_vm_df, Delta_at_df = get_error_dfs(vm_errors, act_errors)

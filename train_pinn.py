@@ -20,7 +20,7 @@ def main():
     experiment_dir = os.path.join("experiments", f"run_{timestamp_str}")
     os.makedirs(experiment_dir, exist_ok=True)
     #Add experiment_dir to config
-    config["path_directory"] = experiment_dir
+    config["PROJECT"]["path_directory"] = experiment_dir
     # 3) Save the config inside that folder
     save_config_yaml(config, experiment_dir)
     dm = ScarPINNDataModule(config)
@@ -32,7 +32,12 @@ def main():
 
     # 6) Trainer
     trainer = PINNTrainer(model,dm, config)
-    trainer.train()
+    if config["TRAINER"]["train_from_checkpoint"]:
+        checkpoint_path = config["TRAINER"]["checkpoint"]
+        print(f"Resuming training from checkpoint: {checkpoint_path}")
+        trainer.train_from_checkpoint(checkpoint_path,config["TRAINER"]["phases"])
+    else:
+        trainer.train()
 
     # 7) Save final model weights
     model_save_path = os.path.join(experiment_dir, "final_model.pth")

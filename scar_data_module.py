@@ -55,6 +55,7 @@ class ScarPINNDataModule:
     config: dict
     dataset_class: Type[Dataset] = CustomDataset
     device: torch.device = None  # will be set in setup_data if None
+    current_phase: str = None
 
     # Outputs populated by setup_data()
     dataloader: Optional[DataLoader] = None
@@ -124,12 +125,16 @@ class ScarPINNDataModule:
         slice_t = cfgD["sampling"]["slice_t"]
         self.num_domain = cfgD["sampling"]["num_domain"]
         self.num_boundary = cfgD["sampling"]["num_boundary"]
-        self.num_data = cfgD["sampling"]["num_data"]
         self.num_init = cfgD["sampling"]["num_init"]
         ic_space_slice = cfgD["sampling"]["ic_space_slice"]
         ic_time_steps = cfgD["sampling"]["ic_time_steps"]
         nx_test_slice = cfgD["sampling"]["nx_test_slice"]
         nt_test_slice = cfgD["sampling"]["nt_test_slice"]
+        indices_collocation = cfgD["sampling"]["indices_collocation"]
+        #if string and string is "all",pick all indices
+        if isinstance(indices_collocation, str) and indices_collocation == "all":
+                indices_collocation = list(range(19))
+        
 
         batch_size = cfgD["loader"]["batch_size"]
         self.batch_size_lbfgs = cfgD["loader"]["batch_size_lbfgs"]
@@ -151,8 +156,8 @@ class ScarPINNDataModule:
         ])
         indices_experiments = np.arange(len(g_il_values))
         sampled_indices = indices_experiments[(indices_experiments + 1) % 4 != 0][:12]
-        print("############# Sampled indices #############", sampled_indices)
-        print("g_il_values in training data", g_il_values[sampled_indices])
+        #print("############# Sampled indices #############", sampled_indices)
+        #print("g_il_values in training data", g_il_values[sampled_indices])
 
         vm_all = np.load("./data/vm_variation_scar_full.npy")
 
@@ -423,6 +428,10 @@ class ScarPINNDataModule:
             pin_memory=True,
             prefetch_factor=2,
         )
+        num_batches = len(self.dataloader)
+        print(f"Training data: {len(self.dataset)} samples, {num_batches} batches of size {batch_size}")
+        #save number of batches to config
+        self.config["DATA"]["loader"]["num_batches"] = num_batches
 
         self.X_test = torch.tensor(features_test_numpy, dtype=torch.float32, device=self.device)
         self.V_test = torch.tensor(V_test, dtype=torch.float32, device=self.device)
@@ -447,4 +456,8 @@ class ScarPINNDataModule:
         """Resample collocation set """
         idx_colocation = np.random.choice(self.features_collocation.shape[0], self.num_domain, replace=False)
         X_collocation_numpy = self.features_collocation[idx_colocation]
-        self.X_collocation_train = torch.tensor(X_collocation_numpy, dtype=torch.float32, device=self.device)
+        if self.current_phase=="lbfgs":
+            self.X_collocation_train = torch.tensor(X_collocation_numpy, dtype=torch.float32)
+            self.X_collocation_train = self.X_collocation_train.to(self.device,non_blocking=True)
+        else:
+            self.X_collocation_train = torch.tensor(X_collocation_numpy, dtype=torch.float32, device=self.device)
