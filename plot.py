@@ -27,7 +27,7 @@ RESULTS_DIR = "./results"
 ANIM_OUTDIR = os.path.join(RESULTS_DIR, "animations")
 ANIM_CODEC = "libx264"
 BITRATE=1000
-FILE_extension = ".png"  # 
+FILE_extension = ".svg"  # 
 
 COND_PATH = Path("./data/conductivities_variation_scar_full.npy")
 VM_FEM_PATH = Path("./data/vm_variation_scar_full.npy")
