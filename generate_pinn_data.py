@@ -245,7 +245,8 @@ def get_v_data(pinn: PINN) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    experiment_path = Path("./experiments/run_20250429_191929")
+    experiment_path =Path("./experiments/run_20250909_193150") 
+    model_path = experiment_path / Path("model_Adam_epoch_4.pth")
     config_path = experiment_path / "config.yaml"
     config = load_config(str(config_path))
     dm = ScarPINNDataModule(config)
@@ -255,7 +256,6 @@ if __name__ == "__main__":
     
 
     pinn = PINN(config, min, max)
-    model_path = experiment_path / "final_model.pth"
 
 
     # Detect device: prefer CUDA, then MPS, then CPU
