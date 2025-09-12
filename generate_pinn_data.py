@@ -32,6 +32,7 @@ COND_SCALE = 12.9 / 1.4        # to convert conductivities from S/m to mm^2/TU
 XY_MICRO_TO_MILLI = 1e-3
 ACTIVATION_THRESHOLD = -20.0   # mV
 
+VPRED_BATCH_SIZE = 1000
 
 @dataclass
 class Geometry:
@@ -50,9 +51,21 @@ def load_geometry() -> Geometry:
 
 
 def load_vm_and_conductivities() -> Tuple[np.ndarray, np.ndarray]:
-    vm_all = np.load(VM_PATH)  # shape (T, V, E)
-    conductivities_all = np.load(COND_PATH) * COND_SCALE  # shape (V, 2, 2, E)
+    """
+    Memory-map the big arrays instead of loading them fully into RAM.
+    This avoids copying a huge (T, V, E) array into system memory.
+    """
+    # memory-map (read-only) the big numpy files
+    vm_all = np.load(VM_PATH, mmap_mode="r")                 # shape (T, V, E) but not loaded into RAM
+    conductivities_all = np.load(COND_PATH, mmap_mode="r")   # shape (V, 2, 2, E)
+    # cast conductivities to float32 and apply scale (this will create a small in-RAM array per-used-slice later)
+    conductivities_all = (conductivities_all * COND_SCALE).astype(np.float32, copy=False)
     return vm_all, conductivities_all
+
+#def load_vm_and_conductivities() -> Tuple[np.ndarray, np.ndarray]:
+#    vm_all = np.load(VM_PATH)  # shape (T, V, E)
+#    conductivities_all = np.load(COND_PATH) * COND_SCALE  # shape (V, 2, 2, E)
+#    return vm_all, conductivities_all
 
 
 def build_time_vector(n_timepoints: int) -> np.ndarray:
@@ -68,18 +81,25 @@ def build_time_vector(n_timepoints: int) -> np.ndarray:
 
 def fem_activation_times(vm_over_time: np.ndarray, t: np.ndarray, threshold: float) -> np.ndarray:
     """
-    Compute per-vertex activation times from FEM voltage traces.
-    vm_over_time: (T, V)
+    Memory-safe computation of per-vertex activation times from FEM voltage traces.
+    vm_over_time: (T, V)  -- memory-mapped is fine
     t: normalized time vector of length T
-    returns: (V,) activation times in *original* time units (multiplied by TIME_NORMALIZER)
+    returns: (V,) activation times in original time units (multiplied by TIME_NORMALIZER)
     """
-    mask = vm_over_time > threshold                       # (T, V)
-    any_true = mask.any(axis=0)                           # (V,)
-    first_idx = np.where(any_true, mask.argmax(axis=0), -1)
+    T, V = vm_over_time.shape
+    act_times = np.full(V, np.nan, dtype=float)
+    not_activated = np.ones(V, dtype=bool)
 
-    act_times = np.full(vm_over_time.shape[1], np.nan, dtype=float)
-    if any_true.any():
-        act_times[any_true] = t[first_idx[any_true]] * TIME_NORMALIZER
+    # scan forward in time, mark activation time for vertices that cross threshold
+    for ti in range(T):
+        if not not_activated.any():
+            break
+        v_row = vm_over_time[ti, :]               # this reads a single time slice (V,) from memmap — minimal memory
+        crossing = (v_row > threshold) & not_activated
+        if crossing.any():
+            act_times[crossing] = t[ti] * TIME_NORMALIZER
+            not_activated[crossing] = False
+
     return act_times
 
 
@@ -114,7 +134,9 @@ def pinn_activation_times(
             t_col = np.full((n_curr, 1), t_current, dtype=np.float32)
             data = np.hstack((base_features[idx, :2], t_col, base_features[idx, 2:]))
             data_tensor = torch.tensor(data, dtype=torch.float32, device=device)
-            v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
+
+            v_pred = predict_in_batches(pinn, data, device, batch_size=VPRED_BATCH_SIZE)
+            #v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
 
             newly_activated = v_pred > threshold
             if newly_activated.any():
@@ -175,7 +197,9 @@ def get_activation_data(
                     exp_col_batch = np.full((n_curr, 1), G_IL_VALUES[exp_idx], dtype=np.float32)
                     data = np.hstack((base[idx, :2], t_col, base[idx, 2:], exp_col_batch))
                     data_tensor = torch.tensor(data, dtype=torch.float32, device=device)
-                    v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
+                    #v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
+                    v_pred = predict_in_batches(pinn, data, device, batch_size=VPRED_BATCH_SIZE)
+
                     newly_activated = v_pred > ACTIVATION_THRESHOLD
                     if newly_activated.any():
                         act_idx = idx[newly_activated]
@@ -198,6 +222,15 @@ def get_activation_data(
     np.save(SAVE_ACT_PINN, activations_all_PINN)
 
 
+def predict_in_batches(pinn, data: np.ndarray, device: torch.device, batch_size: int = 10000) -> np.ndarray:
+    preds = []
+    for i in range(0, data.shape[0], batch_size):
+        batch = data[i:i+batch_size]
+        batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+        with torch.no_grad():
+            out = pinn.predict(batch_tensor)[:, 0].detach().cpu().numpy()
+        preds.append(out)
+    return np.concatenate(preds, axis=0)
 
 def get_v_data(pinn: PINN) -> np.ndarray:
     """Compute full PINN voltage predictions V_PINN with shape (T, V, E)."""
@@ -211,7 +244,8 @@ def get_v_data(pinn: PINN) -> np.ndarray:
     T_len, V_count, E_count = vm_all.shape
     t = build_time_vector(T_len)
 
-    V_PINN = np.zeros_like(vm_all)
+    #V_PINN = np.zeros_like(vm_all)
+    V_PINN = np.memmap(SAVE_V_PINN, dtype=np.float32, mode="w+", shape=vm_all.shape)
 
     with torch.no_grad():
         for exp_idx, g_il in enumerate(G_IL_VALUES):
@@ -230,7 +264,8 @@ def get_v_data(pinn: PINN) -> np.ndarray:
                 exp_col = np.full((V_count, 1), g_il, dtype=np.float32)
                 data = np.hstack((base[:, :2], t_col, base[:, 2:], exp_col))  # (V, 8)
                 data_tensor = torch.tensor(data, dtype=torch.float32, device=device)
-                v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
+                v_pred = predict_in_batches(pinn, data, device, batch_size=VPRED_BATCH_SIZE)
+                #v_pred = pinn.predict(data_tensor)[:, 0].detach().cpu().numpy()
                 V_PINN[ti, :, exp_idx] = v_pred
 
             # Optional diagnostics
@@ -242,42 +277,90 @@ def get_v_data(pinn: PINN) -> np.ndarray:
 
     return V_PINN
 
-
+def compute_minmax_from_vm(vm_path: Path, sample_stride: int = 1) -> Tuple[float, float]:
+    """
+    Compute approximate global min/max of the VM memmap by scanning time-slices.
+    sample_stride: read every `sample_stride`-th timepoint (use >1 to speed up).
+    Returns (min_val, max_val) as Python floats.
+    This never loads the whole array into RAM.
+    """
+    vm_mm = np.load(vm_path, mmap_mode="r")   # (T, V, E)
+    T = vm_mm.shape[0]
+    global_min = float("inf")
+    global_max = float("-inf")
+    # scan time slices, optionally subsample timepoints to speed up
+    for ti in range(0, T, sample_stride):
+        # read the entire slice for all vertices & experiments at time ti -> shape (V, E)
+        slice_ = vm_mm[ti, :, :]
+        # compute min/max on that slice (cheap)
+        smin = float(np.min(slice_))
+        smax = float(np.max(slice_))
+        if smin < global_min:
+            global_min = smin
+        if smax > global_max:
+            global_max = smax
+    # fallback if file empty/unexpected
+    if global_min == float("inf"):
+        global_min, global_max = 0.0, 1.0
+    return global_min, global_max
 
 if __name__ == "__main__":
-    experiment_path =Path("./experiments/run_20250909_193150") 
+    experiment_path = Path("./experiments/run_20250909_193150")
     model_path = experiment_path / Path("model_Adam_epoch_4.pth")
     config_path = experiment_path / "config.yaml"
     config = load_config(str(config_path))
-    dm = ScarPINNDataModule(config)
-    dm.setup_data()
-    min, max = dm.get_minmax_tensors()
-    # 4) Instantiate the model
+
+    # --- Compute min/max from vm file with memmap (no full load, low RAM) ---
+    print("Computing min/max from VM memmap (this will scan time slices)...")
+    vm_min, vm_max = compute_minmax_from_vm(VM_PATH, sample_stride=1)  # you can increase stride to 2 or 5 if needed
+    # Convert to torch tensors like your DataModule would (float32)
     
+    input_dim = config.get("input_dim", 8)  # fallback to 8 if not in config
+    min_tensor = torch.full((input_dim,), vm_min, dtype=torch.float32)
+    max_tensor = torch.full((input_dim,), vm_max, dtype=torch.float32)
 
-    pinn = PINN(config, min, max)
+    #print("VM min/max:", float(min_tensor), float(max_tensor))
 
+    # instantiate model (use CPU device for loading, then move to CUDA)
+    pinn = PINN(config, min_tensor, max_tensor)
 
     # Detect device: prefer CUDA, then MPS, then CPU
     if torch.cuda.is_available():
-        map_location = torch.device("cuda")
+        device = torch.device("cuda")
     elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        map_location = torch.device("mps")
+        device = torch.device("mps")
     else:
-        map_location = torch.device("cpu")
+        device = torch.device("cpu")
 
-
-    state_dict = torch.load(str(model_path), map_location=map_location)
+    print("Using device:", device)
+    # load state dict to CPU first to avoid accidental GPU RAM spikes in torch.load
+    state_dict = torch.load(str(model_path), map_location="cpu")
     pinn.load_state_dict(state_dict)
+    pinn.to(device)
     pinn.eval()
+    # optional: use fp16 if your model works in half precision
+    # pinn.half()
+    # then ensure predict uses float16 tensors
 
+    # small safety: clear state_dict from RAM
+    del state_dict
+    import gc
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
+    # run on a subset of experiments first for debugging (set to all later)
     experiments = np.arange(0, len(G_IL_VALUES), dtype=int)
 
-
+    # Run activation and v prediction
     get_activation_data(pinn, experiments, experiment_path)
 
-
     v_pred_all = get_v_data(pinn)
-    np.save(SAVE_V_PINN, v_pred_all)
+    if isinstance(v_pred_all, np.memmap):
+        v_pred_all.flush()
 
+    # Final cleanup
+    del v_pred_all
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
