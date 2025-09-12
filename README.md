@@ -4,7 +4,12 @@
 ![fig1_study_overview](graphical_abstract.png)
 Fig. 1: Overview of SCAR EP-PINN
 
-<video src="./results/animations/S4_vm_fem_gil_0.025.mp4" width="320" height="240" controls></video>
+
+
+https://github.com/user-attachments/assets/7d133ac8-52c7-46c5-9e86-ee0c32aebacc
+
+
+
 ## Dependencies 
 >h5py = 3.10.0
 >
