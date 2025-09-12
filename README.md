@@ -4,6 +4,26 @@
 ![fig1_study_overview](graphical_abstract.png)
 Fig. 1: Overview of SCAR EP-PINN
 
+
+SCAR EP-PINN can accurately reproduce a low conductivity scenario with areas of complete conduction block:
+
+
+https://github.com/user-attachments/assets/f8caa5e3-8097-4cc6-91e8-24703270920f
+
+SCAR EP-PINN can accurately interpolate to unseen conductivity scenarios: 
+
+https://github.com/user-attachments/assets/7d133ac8-52c7-46c5-9e86-ee0c32aebacc
+
+
+SCAR EP-PINN can accurately extrapolate to unseen conductivity scenarios:
+
+
+
+https://github.com/user-attachments/assets/a43d62ec-17f4-4968-a1eb-4066130b6b3c
+
+
+
+
 ## Dependencies 
 >h5py = 3.10.0
 >
