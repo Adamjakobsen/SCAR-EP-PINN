@@ -923,7 +923,8 @@ def get_v_data(pinn: PINN,epoch) -> np.ndarray:
             
             print("L1 relative error:", abs_sum / v_sum)
             
-    
+    #Save errors
+
 
     return errors
 
@@ -935,41 +936,69 @@ def plot_error_epochs(args):
     n_epochs_data = config["OPTIM"]["phase1"]["epochs"]
     n_epochs_physics = config["OPTIM"]["phase2"]["epochs"]
     n_epochs = n_epochs_data + n_epochs_physics
-    dm = ScarPINNDataModule(config)
-    dm.setup_data()
-    min, max = dm.get_minmax_tensors()
+    #if error files exist, load them
+    if os.path.exists(f"{experiment_path}/l1_errors_epochs.npy") and os.path.exists(f"{experiment_path}/l1_errors_avg_epochs.npy"):
+        error = np.load(f"{experiment_path}/l1_errors_epochs.npy")
+        avg_error = np.load(f"{experiment_path}/l1_errors_avg_epochs.npy")
+        exp_indexes=[3,18,17,16,15]
+        for i,g_il in enumerate(EXPERIMENT_GILS[exp_indexes]):
+            print(f"Experiment {i} G_il={g_il}: Relative L1 Error: {error[i,:]}")
+            plt.plot(np.arange(1,n_epochs+1), error[i,:], label=f"G_il={g_il}")
+
+        plt.plot(np.arange(1,n_epochs+1), avg_error, label=f"Average", color='black', linewidth=2, linestyle='--')
+
+        plt.axvline(x=n_epochs_data, color='red', linestyle='--', label='Physics start')
+        
+        plt.xlabel("Epoch")
+        plt.ylabel("Relative L1 Error")
+        plt.yscale('log')
+        plt.title("Relative L1 Error vs Epoch for Different G_il Values")
+        plt.legend()
+        figname=f"/l1_errors_epoch{FILE_extension}"
+        plt.savefig(RESULTS_DIR + figname)
+        return
+    #Else compute them
     
-    error = np.zeros((5,n_epochs))
-    avg_error = np.zeros(n_epochs)  
-    pinn = PINN(config, min, max)
-
-    for i in range(1,n_epochs+1):
-        print(f"##########################Epoch {i}################################")
+    else:
+        dm = ScarPINNDataModule(config)
+        dm.setup_data()
+        min, max = dm.get_minmax_tensors()
         
-        if i <= n_epochs_data:
-            model_name = f"/model_data_epoch_{i}.pth"
-            print(f"Loading model from data phase: {model_name}")
-        else:
-            model_name = f"/model_Adam_epoch_{i-n_epochs_data}.pth"
-            print(f"Loading model from physics phase: {model_name}")
-        model_path = experiment_path + model_name
+        error = np.zeros((5,n_epochs))
+        avg_error = np.zeros(n_epochs)  
+        pinn = PINN(config, min, max)
 
-        # Detect device: prefer CUDA, then MPS, then CPU
-        if torch.cuda.is_available():
-            map_location = torch.device("cuda")
-        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            map_location = torch.device("mps")
-        else:
-            map_location = torch.device("cpu")
+        for i in range(1,n_epochs+1):
+            print(f"##########################Epoch {i}################################")
+            
+            if i <= n_epochs_data:
+                model_name = f"/model_data_epoch_{i}.pth"
+                print(f"Loading model from data phase: {model_name}")
+            else:
+                model_name = f"/model_Adam_epoch_{i-n_epochs_data}.pth"
+                print(f"Loading model from physics phase: {model_name}")
+            model_path = experiment_path + model_name
+
+            # Detect device: prefer CUDA, then MPS, then CPU
+            if torch.cuda.is_available():
+                map_location = torch.device("cuda")
+            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                map_location = torch.device("mps")
+            else:
+                map_location = torch.device("cpu")
 
 
-        state_dict = torch.load(str(model_path), map_location=map_location)
-        pinn.load_state_dict(state_dict)
-        pinn.eval()
-        
-        error[:,i-1] = get_v_data(pinn,i)
-        avg_error[i-1] = np.mean(error[:,i-1])
+            state_dict = torch.load(str(model_path), map_location=map_location)
+            pinn.load_state_dict(state_dict)
+            pinn.eval()
 
+            error[:,i-1] = get_v_data(pinn,i)
+            avg_error[i-1] = np.mean(error[:,i-1])
+    #Save errors if files do not exist
+    if not os.path.exists(f"{experiment_path}/l1_errors_epochs.npy"):
+        np.save(f"{experiment_path}/l1_errors_epochs.npy", error)
+    if not os.path.exists(f"{experiment_path}/l1_errors_avg_epochs.npy"):
+        np.save(f"{experiment_path}/l1_errors_avg_epochs.npy", avg_error)
     
     exp_indexes=[3,18,17,16,15]
     for i,g_il in enumerate(EXPERIMENT_GILS[exp_indexes]):
