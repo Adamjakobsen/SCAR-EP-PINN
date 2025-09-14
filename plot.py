@@ -14,7 +14,7 @@ from utils import get_mesh_data, get_boundary, load_config
 from scar_data_module import ScarPINNDataModule
 import numpy as np
 import torch
-
+import argparse
 
 EXPERIMENT_GILS = np.linspace(0.01, 0.1, 19)
 DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06, 0.07, 0.075, 0.08],
@@ -22,7 +22,6 @@ DATA_SPLIT = {"train": [0.01, 0.015, 0.02, 0.03, 0.035, 0.04, 0.05, 0.055, 0.06,
               "extrapolation": [0.085, 0.09, 0.095, 0.1]}
 
 ACT_LEVELS = 15
-EXPERIMENT_DIR="/work/adam2/SCAR-EP-PINN/experiments/run_20250909_193150"
 RESULTS_DIR = "./results"
 ANIM_OUTDIR = os.path.join(RESULTS_DIR, "animations")
 ANIM_CODEC = "libx264"
@@ -688,7 +687,7 @@ def make_fig5(t_plot, gils_plot):
                            gils_plot[::-1],
                            figsize,
                            gridspec_kw,
-                           "Fig5.svg",
+                           "Fig5",
                            zoom = zoom)
 
 def get_error_dfs(vm_errors, act_errors):
@@ -928,10 +927,8 @@ def get_v_data(pinn: PINN,epoch) -> np.ndarray:
 
     return errors
 
-def plot_error_epochs():
-
-    
-    experiment_path =EXPERIMENT_DIR
+def plot_error_epochs(args):    
+    experiment_path = args.experiment_path
     config_path = experiment_path + "/config.yaml"
     config = load_config(str(config_path))
 
@@ -969,12 +966,6 @@ def plot_error_epochs():
         state_dict = torch.load(str(model_path), map_location=map_location)
         pinn.load_state_dict(state_dict)
         pinn.eval()
-
-
-        
-
-
-
         
         error[:,i-1] = get_v_data(pinn,i)
         avg_error[i-1] = np.mean(error[:,i-1])
@@ -999,8 +990,9 @@ def plot_error_epochs():
 
 def moving_average(data, window_size):
     return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
-def plot_loss():
-    experiment_path=EXPERIMENT_DIR
+
+def plot_loss(args):
+    experiment_path = args.experiment_path
     losses = np.load(f"{experiment_path}/losses.npy")
     losses_test=np.load(f"{experiment_path}/losses_test.npy")
     iteration_list = losses[:,0]
@@ -1025,8 +1017,11 @@ def plot_loss():
     #save figure
     plt.savefig(f"{RESULTS_DIR}/losses{FILE_extension}")
 
-
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-experiment_path", default = "experiments/run_20250909_193150", help = "path to folder containing the PINN model.")
+    args = parser.parse_args()
+
     t_plot = 430
     gils_plot = [0.01, 0.02, 0.025, 0.1]
     
@@ -1035,20 +1030,21 @@ if __name__ == "__main__":
 
     with open(f"{RESULTS_DIR}/inactivation_data.txt", "w") as f:
         f.write(inact_df.dropna().to_latex())
-    #Figures
-    #make_fig2(t_plot, gils_plot)
-    #make_fig3(vm_errors, act_errors)
-    #make_fig4(t_plot, gils_plot)
-    #make_fig5(t_plot, gils_plot)
     
-    #Animations
-    #make_animations()
+    #Figures
+    make_fig2(t_plot, gils_plot)
+    make_fig3(vm_errors, act_errors)
+    make_fig4(t_plot, gils_plot)
+    make_fig5(t_plot, gils_plot)
 
-    #Loss 
-    plot_loss()
-    plot_error_epochs()
+    #Loss Plots
+    plot_loss(args)
+    #plot_error_epochs(args)
+
+    #Animations
+    make_animations()
 
     #For interactive analysis
-    Delta_vm_df, Delta_at_df = get_error_dfs(vm_errors, act_errors)
+    #Delta_vm_df, Delta_at_df = get_error_dfs(vm_errors, act_errors)
 
     #from IPython import embed; embed()
