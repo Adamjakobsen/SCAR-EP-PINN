@@ -22,7 +22,7 @@ Fig. 1: Overview of SCAR EP-PINN
 
 ## How to get the FEM data
 SCAR-EP PINN is trained on data generated using the finite element method (FEM). You can download the FEM training data
-from the Zenodo repository ....
+from the [Zenodo repository](https://zenodo.org/records/16812462).
 
 ## How to get the pretrained model weights and baises
 A pretrained model is available under
