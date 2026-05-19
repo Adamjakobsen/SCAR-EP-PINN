@@ -12,25 +12,30 @@ def main():
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     args = parser.parse_args()
 
-    # 1) Load config
+    # Load config
     config = load_config(args.config)
 
-    # 2) Generate timestamped folder in ./experiments
+    # Generate timestamped folder in ./experiments
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    experiment_dir = os.path.join("experiments", f"run_{timestamp_str}")
+
+    experiment_dir = os.path.join("experiments", f"run_fibernet_{timestamp_str}")
     os.makedirs(experiment_dir, exist_ok=True)
     #Add experiment_dir to config
     config["PROJECT"]["path_directory"] = experiment_dir
-    # 3) Save the config inside that folder
+    # Save the config inside that folder
     save_config_yaml(config, experiment_dir)
     dm = ScarPINNDataModule(config)
-    dm.setup_data()
+    if config["MODEL"]["sigmanet"]:
+        dm.setup_data()
+    else:
+        dm.setup_data_with_conductivities()
     min, max = dm.get_minmax_tensors()
-    # 4) Instantiate the model
+    # Instantiate the model
     model = PINN2D(config, min, max)
+    model.compile()
 
 
-    # 6) Trainer
+    # Trainer
     trainer = PINNTrainer(model,dm, config)
     if config["TRAINER"]["train_from_checkpoint"]:
         checkpoint_path = config["TRAINER"]["checkpoint"]
@@ -39,10 +44,7 @@ def main():
     else:
         trainer.train()
 
-    # 7) Save final model weights
-    model_save_path = os.path.join(experiment_dir, "final_model.pth")
-    torch.save(model.state_dict(), model_save_path)
-    print(f"Model and config saved to: {experiment_dir}")
+
 
 if __name__ == "__main__":
     main()

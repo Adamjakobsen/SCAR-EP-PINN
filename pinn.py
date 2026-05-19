@@ -2,8 +2,18 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from sigmanet import SigmaNet, setup_data
 
-
+class WaveAct(nn.Module):
+    def __init__(self,omega_0,device):
+        super(WaveAct, self).__init__() 
+        self.A = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.phi = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.omega_0 = omega_0
+    
+    def forward(self, x):
+        #return self.w1 * torch.sin(x)+ self.w2 * torch.cos(x)
+        return self.A * torch.sin(self.phi + x*self.omega_0)
 
 class PINN2D(nn.Module):
     """
@@ -19,15 +29,21 @@ class PINN2D(nn.Module):
 
         mcfg = config["MODEL"]
 
-        # features
-        self.n_in  = int(mcfg.get("in_features", 8))
+    
+ 
+        self.n_in = 4
+   
+        self.n_in = 4
         self.n_out = int(mcfg.get("out_features", 2))
         self.n_layers  = int(mcfg.get("n_layers", 9))
         self.n_neurons = int(mcfg.get("n_neurons", 256))
         activation = str(mcfg.get("activation", "tanh"))
         activation_last = str(mcfg.get("activation_last", "silu"))
-        self.mins = mins
-        self.maxes = maxes
+        self.mins = mins[:self.n_in]
+        self.maxes = maxes[:self.n_in]
+
+        
+
 
         # physics constants
         phys = mcfg.get("physics", {})
@@ -38,8 +54,6 @@ class PINN2D(nn.Module):
         self.eps = float(phys.get("eps", 0.002))
         self.b   = float(phys.get("b", 0.15))
         self.h   = float(phys.get("h", 0.1))
-        self.beta = float(phys.get("beta", 1.4e-5))
-        self.Cm   = float(phys.get("Cm", 1e-3))
         self.mS_cm = float(phys.get("mS_cm", 10.0))
         self.vm_rest = float(phys.get("vm_rest", -80.0))  # mV
         self.vm_norm = float(phys.get("vm_norm", 100.0))
@@ -51,7 +65,19 @@ class PINN2D(nn.Module):
         self.w_bc   = float(lw.get("w_bc",  0.01))
         self.w_ic   = float(lw.get("w_ic",  1.0))
         self.w_data = float(lw.get("w_data",1.0))
+                # Healthy 
+        self.h_gil = 2.8 
+        self.h_git = 0.26
+        self.h_gel = 2.2
+        self.h_get = 1.3
 
+        # Scar/LGE (inside LGE). g_il in scar comes from the input feature.
+        self.s_git = 0.002#float(s.get("g_it", 0.002))
+        self.s_gel = 1.0#float(s.get("g_el", 1.0))
+        self.s_get = 1.0#float(s.get("g_et", 1.0))
+        self.kapa=12.9/1.4
+        
+        
         if activation == "tanh":
             activation = nn.Tanh()
         elif activation == "silu":
@@ -64,8 +90,8 @@ class PINN2D(nn.Module):
 
         
 
-        a = torch.ones_like(self.maxes)*(-1)
-        b = torch.ones_like(self.maxes)*1
+        a = torch.ones_like(self.maxes)*(-2)
+        b = torch.ones_like(self.maxes)*2
         # Construct model
         layers = []
         # Scaling layer
@@ -108,13 +134,39 @@ class PINN2D(nn.Module):
         print("PINN2D architecture:")
         print(self.model)
 
+        
+    
+
+
     def forward(self, x):
-        return self.model(x)
+
+        return self.model(x[:,0:self.n_in])
 
     def predict(self, x):
         """Predicted membrane voltage (in mV)."""
-        out = self.model(x)
+        out = self.model(x[:,0:self.n_in])
         return out[:, 0:1] * self.vm_norm + self.vm_rest
+    def freeze_layers(self, up_to: int):
+        """
+        Freezes the first 'up_to' modules in self.model.
+        self.model is an nn.Sequential (or DataParallel wrapper).
+        """
+        
+        # Get the actual sequential model, unwrapping DataParallel if needed
+        model_to_freeze = self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
+
+        print(f"--- Freezing first {up_to} modules of the model ---")
+        ct = 0
+        # model_to_freeze is the nn.Sequential, which is iterable
+        for module in model_to_freeze:
+            if ct < up_to:
+                print(f"Freezing module {ct}: {module.__class__.__name__}")
+                for param in module.parameters():
+                    param.requires_grad = False
+            else:
+                print(f"Module {ct} remains trainable: {module.__class__.__name__}")
+            ct += 1
+        print("--------------------------------------------------")
 
     def data_loss(self, x_data, v_true, w_true):
         """
@@ -138,7 +190,7 @@ class PINN2D(nn.Module):
 
     def eval_rel_l1(self, x_data, v_true, w_true):
         """
-        Relative L1 norm (useful for a quick measure).
+        Relative L1 norm 
         """
         with torch.no_grad():
             out = self.forward(x_data)
@@ -148,63 +200,142 @@ class PINN2D(nn.Module):
                        torch.sum(torch.abs((v_true - self.vm_rest) / self.vm_norm))
             rel_l1_w = torch.sum(torch.abs(w_pred - w_true)) / torch.sum(torch.abs(w_true))
         return rel_l1_v, rel_l1_w
+    
+    def _sigma_m_from_fiber_region(
+        self,
+        ef_x: torch.Tensor,
+        ef_y: torch.Tensor,
+        g_il_in: torch.Tensor,        # per-experiment scalar broadcasted over points
+        region_marker: torch.Tensor,  # 1=healthy, 3=scar (float or int)
+    ) -> torch.Tensor:
+        """
+        Build Σ_m at each point using:
+        - Healthy:  (g_il,g_it,g_el,g_et) = (self.h_gil,self.h_git,self.h_gel,self.h_get)
+        - Scar:     (g_il,g_it,g_el,g_et) = (g_il_in,self.s_git,self.s_gel,self.s_get)
+        Rotation: R = [[ex, ey], [-ey, ex]],  ~Σ = R Σ R^T,
+        Monodomain: Σ_m = (Σ_i~ + Σ_e~)^{-1} (Σ_i~ Σ_e~)  
+        Returns: (N,2,2)
+        """
+        dtype = ef_x.dtype
+        device = ef_x.device
 
-    def pde2d_conductivities(self, x_collocation):
+        
+        ex, ey = ef_x, ef_y
+        R = torch.stack(
+            [torch.cat([ex,  ey], dim=1),
+            torch.cat([-ey, ex], dim=1)],
+            dim=1
+        )  # (N,2,2)
+        Rt = R.transpose(1, 2)
+
+        # Mask: scar if marker ~ 3
+        is_scar = (region_marker >= (3 - 0.5))
+
+        # Local conductivities
+        g_il_loc = torch.where(is_scar, g_il_in, torch.full_like(g_il_in, self.h_gil))
+        g_it_loc = torch.where(is_scar, torch.full_like(g_il_in, self.s_git),
+                                        torch.full_like(g_il_in, self.h_git))
+        g_el_loc = torch.where(is_scar, torch.full_like(g_il_in, self.s_gel),
+                                        torch.full_like(g_il_in, self.h_gel))
+        g_et_loc = torch.where(is_scar, torch.full_like(g_il_in, self.s_get),
+                                        torch.full_like(g_il_in, self.h_get))
+
+        # Diagonal Σ_i and Σ_e in fiber frame
+        N = ef_x.size(0)
+        Si = torch.zeros(N, 2, 2, dtype=dtype, device=device)
+        Se = torch.zeros_like(Si)
+
+        Si[:, 0, 0] = g_il_loc.squeeze(-1)  # longitudinal
+        Si[:, 1, 1] = g_it_loc.squeeze(-1)  # transverse
+
+        Se[:, 0, 0] = g_el_loc.squeeze(-1)
+        Se[:, 1, 1] = g_et_loc.squeeze(-1)
+
+        # Rotate to physical frame:  ~Σ = R Σ R^T
+        Si_t = R.bmm(Si).bmm(Rt)
+        Se_t = R.bmm(Se).bmm(Rt)
+
+        # Monodomain projection
+        A = Si_t + Se_t
+        #A_inv =torch.linalg.pinv(A)                    # (N,2,2)
+        B = Si_t.bmm(Se_t)                 # (N,2,2)
+        Sigma_m = torch.linalg.solve(A, B) # A X = B  -> X = A^{-1} B
+        #print("Sigma_m shape", Sigma_m.shape)
+        return self.kapa*Sigma_m
+        
+
+    def pde2d_conductivities(self, x_collocation,fibernet):
         """
-        PDE + ODE residual loss for the Aliev-Panfilov model, with conductivities.
-        x_collocation expected shape: [N, 8] => (x, y, t, sigma_a, sigma_b, sigma_c, sigma_d, experiment_id)
+        PDE + ODE residual loss for the Aliev-Panfilov model
         """
+        
         x_space = x_collocation[:, 0:1].requires_grad_()
         y_space = x_collocation[:, 1:2].requires_grad_()
         t_space = x_collocation[:, 2:3].requires_grad_()
-
-        sigma_a = x_collocation[:, 3:4].requires_grad_()
-        sigma_b = x_collocation[:, 4:5].requires_grad_()
-        sigma_c = x_collocation[:, 5:6].requires_grad_()
-        sigma_d = x_collocation[:, 6:7].requires_grad_()
-        experiment = x_collocation[:, 7:8] 
-
-        y_pred = self.forward(
-            torch.cat([x_space, y_space, t_space, sigma_a, sigma_b, sigma_c, sigma_d, experiment], dim=1)
+        fibers = fibernet(torch.cat([x_space, y_space], dim=1))  # (N, 2)
+        ex, ey = fibers[:, 0:1], fibers[:, 1:2]
+        R = torch.stack(
+            [torch.cat([ex,  ey], dim=1),
+            torch.cat([-ey, ex], dim=1)],
+            dim=1
         )
+        markers = x_collocation[:, 4:5]
+
+        g_il = x_collocation[:, 3:4]
+        y_pred = self.forward(
+                torch.cat([x_space, y_space, t_space, g_il], dim=1)
+            )
         v = y_pred[:, 0:1]
         w = y_pred[:, 1:2]
+        dV_dt, dV_dx, dV_dy = torch.autograd.grad(
+            outputs=v, inputs=(t_space, x_space, y_space),
+            grad_outputs=torch.ones_like(v),
+            create_graph=True, retain_graph=True
+        )
 
-        dV_dt = torch.autograd.grad(v, t_space, torch.ones_like(v), create_graph=True)[0]
-        dV_dx = torch.autograd.grad(v, x_space, torch.ones_like(v), create_graph=True)[0]
-        dV_dy = torch.autograd.grad(v, y_space, torch.ones_like(v), create_graph=True)[0]
-        f1_ = sigma_a * dV_dx + sigma_b * dV_dy
-        f2_ = sigma_c * dV_dx + sigma_d * dV_dy
-        f1 = torch.autograd.grad(f1_, x_space, torch.ones_like(f1_), create_graph=True)[0]
-        f2 = torch.autograd.grad(f2_, y_space, torch.ones_like(f2_), create_graph=True)[0]
-        PDE = -dV_dt + (f1 + f2) - self.k * v * (v - self.a) * (v - 1) - w * v
+        Sigma = self._sigma_m_from_fiber_region(ex, ey, g_il, markers)
+        
+        Jx = Sigma[:, 0, 0:1]*dV_dx + Sigma[:, 0, 1:2]*dV_dy
+        Jy = Sigma[:, 1, 0:1]*dV_dx + Sigma[:, 1, 1:2]*dV_dy
 
-        dW_dt = torch.autograd.grad(w, t_space, torch.ones_like(w), create_graph=True)[0]
-        ODE = dW_dt - (self.eps + (self.mu1 * w) / (self.mu2 + v)) * (-w - self.k * v * (v - self.b - 1))
+        dJx_dx, dJy_dy = torch.autograd.grad(
+            outputs=(Jx, Jy), inputs=(x_space, y_space),
+            grad_outputs=(torch.ones_like(Jx), torch.ones_like(Jy)),
+            create_graph=True, retain_graph=True
+        )
 
+        
+        PDE = -dV_dt + (dJx_dx + dJy_dy) - self.k*v*(v - self.a)*(v - 1.0) - w*v
+
+        dW_dt = torch.autograd.grad(w, t_space, torch.ones_like(w), create_graph=False, retain_graph=True)[0]
+        ODE = dW_dt - (self.eps + (self.mu1*w)/(self.mu2 + v)) * (-w - self.k*v*(v - self.b - 1.0))
         return torch.mean(PDE**2), torch.mean(ODE**2)
 
-    def bc_loss(self, x_boundary, normals):
+    def bc_loss(self, x_boundary, normals,fibernet):
         """
-        Neumann boundary condition: no-flux => normal · (sigma ∇V) = 0
-        x_boundary shape [N, 8], normals [N, 2]
+        Neumann boundary condition: no-flux 
         """
+
         xb = x_boundary[:, 0:1].requires_grad_()
         yb = x_boundary[:, 1:2].requires_grad_()
         tb = x_boundary[:, 2:3].requires_grad_()
+        g_il = x_boundary[:, 3:4]
+        markers = x_boundary[:, 4:5]
+        fibers = fibernet(torch.cat([xb, yb], dim=1))  # (N, 2)
+        ex, ey = fibers[:, 0:1], fibers[:, 1:2]
+        v = self.forward(torch.cat([xb, yb, tb, g_il], dim=1))[:, 0:1]
+        
 
-        sigma_a = x_boundary[:, 3:4].requires_grad_()
-        sigma_b = x_boundary[:, 4:5].requires_grad_()
-        sigma_c = x_boundary[:, 5:6].requires_grad_()
-        sigma_d = x_boundary[:, 6:7].requires_grad_()
-        experiment = x_boundary[:, 7:8]
+        dV_dx = torch.autograd.grad(v, xb, torch.ones_like(v), create_graph=True)[0]
+        dV_dy = torch.autograd.grad(v, yb, torch.ones_like(v), create_graph=True)[0]
 
-        v_pred = self.forward(torch.cat([xb, yb, tb, sigma_a, sigma_b, sigma_c, sigma_d, experiment], dim=1))[:, 0:1]
-        dV_dx = torch.autograd.grad(v_pred, xb, torch.ones_like(v_pred), create_graph=True)[0]
-        dV_dy = torch.autograd.grad(v_pred, yb, torch.ones_like(v_pred), create_graph=True)[0]
-        flux = (normals[:, 0:1] * (sigma_a * dV_dx + sigma_b * dV_dy) +
-                normals[:, 1:2] * (sigma_c * dV_dx + sigma_d * dV_dy))
-        return torch.mean(flux**2)
+        Sigma = self._sigma_m_from_fiber_region(ex, ey, g_il,markers)
+        Jx = Sigma[:, 0, 0:1]*dV_dx + Sigma[:, 0, 1:2]*dV_dy
+        Jy = Sigma[:, 1, 0:1]*dV_dx + Sigma[:, 1, 1:2]*dV_dy
+
+        n = normals
+        flux_n = n[:, 0:1]*Jx + n[:, 1:2]*Jy
+        return flux_n.pow(2).mean()
 
     def ic_loss(self, x_ic, v_ic_true, w_ic_true):
         """

@@ -65,9 +65,7 @@ def make_experiment_dir(cfg: Dict[str, Any]) -> Path:
 
 
 def get_mesh_data():
-    # Provide your custom HDF5 read logic or geometry load logic here.
-    # This example is just a placeholder.
-    # Return (coordinates, triangles, vm):
+
     with h5py.File("./meshes/scarmesh_1.h5", "r") as scar_file:
         coordinates = scar_file["coordinates"][:]
         triangles = scar_file["topology"][:]

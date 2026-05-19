@@ -245,14 +245,14 @@ def get_v_data(pinn: PINN) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    experiment_path =Path("./experiments/run_20250909_193150") 
-    model_path = experiment_path / Path("model_Adam_epoch_4.pth")
+    experiment_path =Path("./experiments/run_with_fibernet") 
+    model_path = experiment_path / Path("model_best.pth")
     config_path = experiment_path / "config.yaml"
     config = load_config(str(config_path))
     dm = ScarPINNDataModule(config)
     dm.setup_data()
     min, max = dm.get_minmax_tensors()
-    # 4) Instantiate the model
+
     
 
     pinn = PINN(config, min, max)

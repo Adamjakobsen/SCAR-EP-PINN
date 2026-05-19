@@ -7,8 +7,11 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+import itertools
 from scar_data_module import ScarPINNDataModule, CustomDataset
+from fibernet import FiberNet
+from fibernet import setup_data as setup_fibernet_data
+import matplotlib.pyplot as plt
 
 
 class PINNTrainer:
@@ -89,7 +92,28 @@ class PINNTrainer:
 
         # where to save
         self.out_dir = str(config["PROJECT"]["path_directory"])
+        print(f"Outputs (models, losses) will be saved to: {self.out_dir}")
         os.makedirs(self.out_dir, exist_ok=True)
+    
+
+    
+    def build_fibernet(self):
+        X,y,mins,maxs = setup_fibernet_data()
+        fibernet = FiberNet(
+            input_dim=2,  # x, y
+            output_dim=2, # e_fib_x, e_fib_y
+            hidden_layers=3,
+            hidden_units=512,
+            mins=mins,
+            maxs=maxs
+        ).to(self.device)
+        state_dict = torch.load(f"fibernet.pth", map_location=self.device)
+        fibernet.load_state_dict(state_dict)
+        fibernet.eval()
+        for p in fibernet.parameters():
+            p.requires_grad = False
+        print("Loaded pretrained FiberNet with state_dict from fibernet.pth")
+        return fibernet
 
     # -------------------------------------------------------------------------
     # Data acquisition 
@@ -105,7 +129,15 @@ class PINNTrainer:
         self.dataloader = self.dm.dataloader
         self.dataset = self.dm.dataset
 
-        self.X_collocation_train = self.dm.X_collocation_train
+        self.collocation_dataloader = self.dm.collocation_dataloader
+        self.collocation_dataset = self.dm.collocation_dataset
+        self.collocation_iter = itertools.cycle(self.collocation_dataloader)
+
+        self.boundary_dataloader = self.dm.boundary_dataloader
+        self.boundary_dataset = self.dm.boundary_dataset
+        self.boundary_iter = itertools.cycle(self.boundary_dataloader)
+
+        #self.X_collocation_train = self.dm.X_collocation_train
         self.X_boundary = self.dm.X_boundary
         self.X_normals = self.dm.X_normals
 
@@ -121,21 +153,94 @@ class PINNTrainer:
 
         
         self.model.to(self.device)
+        self.fibernet=self.build_fibernet()
+
 
 
     @torch.no_grad()
     def resample(self):
         self.dm.resample()
-        self.X_collocation_train = self.dm.X_collocation_train
+        self.X_boundary = self.dm.X_boundary
+        self.X_normals = self.dm.X_normals
+        #self.X_collocation_train = self.dm.X_collocation_train
+
+    def _plot_loss_array(self, arr, labels, filename, title, logy=True, column_order=None):
+        if arr is None or len(arr) == 0:
+            return
+
+        data = np.asarray(arr, dtype=np.float64)
+        if data.ndim != 2 or data.shape[1] < 2:
+            return
+
+        x = data[:, 0]
+
+        if column_order is None:
+            column_order = list(range(1, min(data.shape[1], len(labels) + 1)))
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+
+        for col_idx in column_order:
+            label_idx = col_idx - 1
+            if col_idx >= data.shape[1] or label_idx >= len(labels):
+                continue
+
+            y = data[:, col_idx]
+            if logy:
+                y = np.clip(y, 1e-16, None)
+                ax.semilogy(x, y, label=labels[label_idx], linewidth=1.2)
+            else:
+                ax.plot(x, y, label=labels[label_idx], linewidth=1.2)
+
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Loss / metric")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(self.out_dir, filename), dpi=150)
+        plt.close(fig)
+
+
+    def save_loss_plots(self):
+        self._plot_loss_array(
+            self.losses,
+            labels=["mse_v", "mse_w", "rel_v", "rel_w", "mae_v", "mae_w"],
+            filename="losses.png",
+            title="Training losses / metrics",
+            logy=True,
+        )
+
+        self._plot_loss_array(
+            self.losses_test,
+            labels=["mse_v_test", "mse_w_test", "rel_v", "rel_w", "mae_v", "mae_w"],
+            filename="losses_test.png",
+            title="Test losses / metrics",
+            logy=True,
+        )
+
+        self._plot_loss_array(
+            self.losses_phys,
+            labels=["pde", "ode", "bc", "ic_v", "ic_w"],
+            filename="losses_phys.png",
+            title="Physics losses",
+            logy=True,
+            column_order=[3, 4, 5, 1, 2]
+        )
+    
+        
+
+
 
     # -------------------------------------------------------------------------
     # Training phases
     # -------------------------------------------------------------------------
     def data_phase(self):
         n_epochs = int(self.config["OPTIM"]["phase1"]["epochs"])
-        best_rel_l1_v = float("inf")
+        RL1_best = float("inf")
         
         for epoch in range(n_epochs):
+            self.plot_frame(t_plot=430,epoch=epoch,phase="data")
             epoch_loss = 0.0
             pbar = tqdm(self.dataloader, desc=f"Data Phase Epoch {epoch+1}/{n_epochs}", leave=False)
             for batch in pbar:
@@ -149,26 +254,33 @@ class PINNTrainer:
                 loss.backward()
                 self.optimizer_phase1.step()
                 #current lr from scheduler
-                self.scheduler_data.step()
                 lr = self.scheduler_data.get_last_lr()[0]
+                if lr>6e-5:
+                    self.scheduler_data.step()
 
                 
                 epoch_loss += loss.item()
+                
                 with torch.no_grad():
                     rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
                     mae_v, mae_w = self.model.eval_mae(self.X_test, self.V_test, self.W_test)
                     mse_v_test, mse_w_test = self.model.data_loss(self.X_test, self.V_test, self.W_test)
                     self.losses_test.append([self.iteration, mse_v_test.item(), mse_w_test.item(),
-                                             rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
+                                            rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
+                if rel_v.item()<RL1_best:
+                    RL1_best=rel_v.item()
+                    #Save best model
+                    path = os.path.join(self.out_dir, f"model_data_best.pth")
+                    torch.save(self.model.state_dict(), path)
                 pbar.set_postfix({
                     "LR": f"{lr:.2e}",
                     "MSE_v": f"{mse_v.item():.4e}",
-                    "MSE_V_t": f"{mse_v_test.item():.4e}",
+                    #"MSE_V_t": f"{mse_v_test.item():.4e}",
                     "MSE_w": f"{mse_w.item():.4e}",
                     "Rel L1 V": f"{rel_v.item():.4e}",
-                    "Rel L1 W": f"{rel_w.item():.4e}",
+                    #"Rel L1 W": f"{rel_w.item():.4e}",
                     "MAE V": f"{mae_v.item():.4e}",
-                    "MAE W": f"{mae_w.item():.4e}",
+                    #"MAE W": f"{mae_w.item():.4e}",
                 })
 
                 self.losses.append([self.iteration, mse_v.item(), mse_w.item(),
@@ -181,7 +293,7 @@ class PINNTrainer:
             epoch_loss /= max(1, len(self.dataloader))
 
             rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
-            best_rel_l1_v = min(best_rel_l1_v, rel_v.item())
+            RL1_best = min(RL1_best, rel_v.item())
             print(f"[Data Phase] Epoch {epoch+1}/{n_epochs} | "
                   f"Train Loss (avg): {epoch_loss:.4e} | "
                   f"Rel L1 V: {rel_v.item():.4e}, Rel L1 W: {rel_w.item():.4e}")
@@ -193,29 +305,65 @@ class PINNTrainer:
 
     def adam_phase(self):
         n_epochs = int(self.config["OPTIM"]["phase2"]["epochs"])
+  
         #Physics losses
-        collocation_data = self.config["DATA"]["sampling"]["collocation_data"]
-        
+
+
+        RL1_best = float("inf")
+
         for epoch in range(n_epochs):
+
             epoch_loss_v = 0.0
-            pbar = tqdm(self.dataloader, desc=f"Adam Phase Epoch {epoch+1}/{n_epochs}", leave=False)
-            for b_idx, batch in enumerate(pbar, start=1):
-                X_data = batch["X"].to(self.device)
-                V_data = batch["V"].to(self.device)
-                W_data = batch["W"].to(self.device)
+            
+            steps_per_epoch = max(
+                len(self.dataloader),
+                len(self.collocation_dataloader),
+                len(self.boundary_dataloader),
+            )
+
+            data_iter = itertools.cycle(self.dataloader)
+            collocation_iter = itertools.cycle(self.collocation_dataloader)
+            boundary_iter = itertools.cycle(self.boundary_dataloader)
+
+            pbar = tqdm(
+                range(steps_per_epoch),
+                total=steps_per_epoch,
+                desc=f"Adam Phase Epoch {epoch+1}/{n_epochs}",
+                leave=False,
+            )
+
+            
+            for b_idx, _ in enumerate(pbar, start=1):
+                batch = next(data_iter)
+                collocation_batch = next(collocation_iter)
+                boundary_batch = next(boundary_iter)
+
+                non_blocking = (self.device.type == "cuda")
+
+                X_data = batch["X"].to(self.device, non_blocking=non_blocking)
+                V_data = batch["V"].to(self.device, non_blocking=non_blocking)
+                W_data = batch["W"].to(self.device, non_blocking=non_blocking)
+
+                X_collocation = collocation_batch["X"].to(self.device, non_blocking=non_blocking)
+
+                Xb = boundary_batch["X"].to(self.device, non_blocking=non_blocking)
+                normals = boundary_batch["X_normals"].to(self.device, non_blocking=non_blocking)
+
 
                 self.optimizer_phase2.zero_grad()
-                pde_loss, ode_loss = self.model.pde2d_conductivities(self.X_collocation_train)
-                bc_loss = self.model.bc_loss(self.X_boundary, self.X_normals)
+                pde_loss, ode_loss = self.model.pde2d_conductivities(X_collocation,self.fibernet)
+
+                bc_loss = self.model.bc_loss(Xb, normals,self.fibernet)
                 ic_v, ic_w = self.model.ic_loss(self.X_ic_train, self.V_ic_train, self.W_ic_train)
                 mse_v, mse_w = self.model.data_loss(X_data, V_data, W_data)
                 epoch_loss_v += mse_v.item()
 
+                
                 total = (self.model.w_pde * pde_loss +
                          self.model.w_ode * ode_loss +
                          self.model.w_bc * bc_loss +
                          self.model.w_ic * (ic_v + ic_w) +
-                         self.model.w_data * (mse_v + mse_w))
+                         self.model.w_data * (w_data*mse_v + mse_w))
 
                 total.backward()
                 if self.clip_grad_norm > 0:
@@ -223,6 +371,7 @@ class PINNTrainer:
                 self.optimizer_phase2.step()
                 self.scheduler_phase2.step()
                 lr = self.scheduler_phase2.get_last_lr()[0]
+
                 with torch.no_grad():
                     rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
                     mae_v, mae_w = self.model.eval_mae(self.X_test, self.V_test, self.W_test)
@@ -245,16 +394,21 @@ class PINNTrainer:
                     "MAE W": f"{mae_w.item():.2e}",
                 })
 
-                if self.resample_adam_every > 0 and (b_idx % self.resample_adam_every == 0):
-                    self.resample()
 
                 self.losses.append([self.iteration, mse_v.item(), mse_w.item(),
                                     rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
+
                 self.iteration += 1
 
-                del X_data, V_data, W_data
+                del X_data, V_data, W_data, X_collocation
+                
 
                 
+            if rel_v.item()<RL1_best:
+                RL1_best=rel_v.item()
+                #Save best model
+                path = os.path.join(self.out_dir, f"model_best.pth")
+                torch.save(self.model.state_dict(), path)
 
             rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
             mae_v, mae_w = self.model.eval_mae(self.X_test, self.V_test, self.W_test)
@@ -262,184 +416,34 @@ class PINNTrainer:
                   f"Epoch loss avg V: {epoch_loss_v / max(1, len(self.dataloader)):.4e}, "
                   f"Rel L1 V: {rel_v.item():.4e}, Rel L1 W: {rel_w.item():.4e}, "
                   f"MAE V: {mae_v.item():.4e}, MAE W: {mae_w.item():.4e}")
-
             # checkpoint
             path = os.path.join(self.out_dir, f"model_Adam_epoch_{epoch+1}.pth")
             torch.save(self.model.state_dict(), path)
             np.save(os.path.join(self.out_dir, "losses.npy"), self.losses)
             np.save(os.path.join(self.out_dir, "losses_test.npy"), self.losses_test)
             np.save(os.path.join(self.out_dir, "losses_phys.npy"), self.losses_phys)
+        #run.finish()
         
-    def lbfgs_phase(self):
-        self.dm.current_phase="lbfgs"
-        n_epochs = int(self.config["OPTIM"]["lbfgs"]["epochs"])
-        # a non-shuffling loader over the full dataset for LBFGS passes
-        
-        N = len(self.dataset)
-
-        self.model.train()           # or set BN to eval() explicitly to avoid changing stats during line search
-        for epoch in range(n_epochs):
-
-            pbar = tqdm(self.dataloader_lbfgs, desc=f"L-BFGS Phase Epoch {epoch+1}/{n_epochs}", leave=False)
-            def closure():
-                self.optimizer_lbfgs.zero_grad(set_to_none=True)
-
-                # data term: stream through all batches, accumulate average loss and gradients
-                total_data_loss = 0.0
-                total_phys = 0.0
-                for b_idx,batch in enumerate(pbar, start=1):
-                    #Non-blocking transfer if pinned memory
-                    Xb = batch["X"].to(self.device, non_blocking=True)
-                    Vb = batch["V"].to(self.device, non_blocking=True)
-                    Wb = batch["W"].to(self.device, non_blocking=True)
-                    mse_v_b, mse_w_b = self.model.data_loss(Xb, Vb, Wb)
-                    # scale by batch size / N so summed grads equal full-batch gradient
-                    bs = Xb.shape[0]
-                    data_term = (mse_v_b + mse_w_b) * (bs / N)
-                    data_term.backward()   # accumulate gradients; graph is freed batch-by-batch
-                    total_data_loss += data_term.detach()
-
-                    # physics terms 
-                    pde_loss, ode_loss = self.model.pde2d_conductivities(self.X_collocation_train)
-                    bc_loss = self.model.bc_loss(self.X_boundary, self.X_normals)
-                    ic_v, ic_w = self.model.ic_loss(self.X_ic_train, self.V_ic_train, self.W_ic_train)
-
-                    #if (b_idx % self.resample_lbfgs_every == 0):
-                    loss_phys = (self.model.w_pde * pde_loss +
-                                self.model.w_ode * ode_loss +
-                                self.model.w_bc * bc_loss +
-                                self.model.w_ic * (ic_v + ic_w))
-                    # backprop physics part once (already scalar)
-                    loss_phys.backward()
-                    total_phys += loss_phys.detach()
-
-                
-                    # safe logging/eval outside the closure
-                    with torch.no_grad():
-                        rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
-                        mae_v, mae_w = self.model.eval_mae(self.X_test, self.V_test, self.W_test)
-                    self.resample()
-                    
-                    pbar.set_postfix({
-                        "PDE": f"{pde_loss.item():.2e}",
-                        "ODE": f"{ode_loss.item():.2e}",
-                        "BC": f"{bc_loss.item():.2e}",
-                        "MSE_v": f"{mse_v_b.item():.2e}",
-                        "Rel L1 V": f"{rel_v.item():.2e}",
-                        "mae V": f"{mae_v.item():.2e}",
-                        "MSE_w": f"{mse_w_b.item():.2e}",
-                    })
-                print(f"[L-BFGS Phase] Epoch {epoch+1}/{n_epochs} | "
-                    f" Rel L1 V: {rel_v.item():.4e}, Rel L1 W: {rel_w.item():.4e}, "
-                    f"MAE V: {mae_v.item():.4e}, MAE W: {mae_w.item():.4e}")
-
-                # return total objective value (for line search/diagnostics)
-                total = total_phys + self.model.w_data * total_data_loss
-                return total
-
-            # Do not modify data sampling inside step(); do not log from the closure.
-            loss = self.optimizer_lbfgs.step(closure)
 
 
 
-            if self.scheduler_lbfgs is not None:
-                self.scheduler_lbfgs.step()
 
-            # checkpoint
-            path = os.path.join(self.out_dir, f"model_lbfgs_epoch_{epoch+1}.pth")
-            torch.save(self.model.state_dict(), path)
-
-
-    def lbfgs_phase_(self):
-        n_epochs = int(self.config["OPTIM"]["lbfgs"]["epochs"])
-
-        for epoch in range(n_epochs):
-            pbar = tqdm(self.dataloader_lbfgs, desc=f"L-BFGS Phase Epoch {epoch+1}/{n_epochs}", leave=False)
-            for b_idx, batch in enumerate(pbar, start=1):
-                X_data = batch["X"].to(self.device)
-                V_data = batch["V"].to(self.device)
-                W_data = batch["W"].to(self.device)
-
-                def closure():
-                    self.optimizer_lbfgs.zero_grad()
-                    pde_loss, ode_loss = self.model.pde2d_conductivities(self.X_collocation_train)
-                    bc_loss = self.model.bc_loss(self.X_boundary, self.X_normals)
-                    ic_v, ic_w = self.model.ic_loss(self.X_ic_train, self.V_ic_train, self.W_ic_train)
-                    mse_v, mse_w = self.model.data_loss(X_data, V_data, W_data)
-
-                    total = (self.model.w_pde * pde_loss +
-                             self.model.w_ode * ode_loss +
-                             self.model.w_bc * bc_loss +
-                             self.model.w_ic * (ic_v + ic_w) +
-                             self.model.w_data * (mse_v + mse_w))
-                    total.backward()
-
-                    with torch.no_grad():
-                        mae_v, mae_w = self.model.eval_mae(self.X_test, self.V_test, self.W_test)
-                        rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
-                    pbar.set_postfix({
-                        "PDE": f"{pde_loss.item():.2e}",
-                        "ODE": f"{ode_loss.item():.2e}",
-                        "BC": f"{bc_loss.item():.2e}",
-                        "MSE_v": f"{mse_v.item():.2e}",
-                        "MSE_w": f"{mse_w.item():.2e}",
-                        "MAE V": f"{mae_v.item():.2e}",
-                        "MAE W": f"{mae_w.item():.2e}",
-                    })
-                    self.losses.append([self.iteration, mse_v.item(), mse_w.item(),
-                                        rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
-                    self.losses_test.append([self.iteration, mse_v.item(), mse_w.item(),
-                                             rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
-                    self.losses_phys.append([self.iteration, pde_loss.item(), ode_loss.item(), bc_loss.item(),
-                                            ic_v.item(), ic_w.item()])
-                    
-                    return total
-
-                if self.resample_lbfgs_every > 0 and (b_idx % self.resample_lbfgs_every == 0):
-                    self.resample()
-
-                self.iteration += 1
-                self.optimizer_lbfgs.step(closure)
-
-                del X_data, V_data, W_data
-
-            if self.scheduler_lbfgs is not None:
-                self.scheduler_lbfgs.step()
-
-            with torch.no_grad():
-                rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
-                mae_v, mae_w = self.model.eval_mae(self.X_test, self.V_test, self.W_test)
-            print(f"[L-BFGS Phase] Epoch {epoch+1}/{n_epochs} | "
-                  f"Rel L1 V: {rel_v.item():.4e}, Rel L1 W: {rel_w.item():.4e}, "
-                  f"MAE V: {mae_v.item():.4e}, MAE W: {mae_w.item():.4e}")
-
-            # checkpoint
-            path = os.path.join(self.out_dir, f"model_lbfgs_epoch_{epoch+1}.pth")
-            torch.save(self.model.state_dict(), path)
-            np.save(os.path.join(self.out_dir, "losses.npy"), self.losses)
-            np.save(os.path.join(self.out_dir, "losses_test.npy"), self.losses_test)
-            np.save(os.path.join(self.out_dir, "losses_phys.npy"), self.losses_phys)
-
-    # -------------------------------------------------------------------------
-    # High-level driver
-    # -------------------------------------------------------------------------
     def train(self) -> None:
         self.setup_data()
+
         print("\n=== [Phase 1: Data Pretraining] ===")
         self.data_phase()
 
         print("\n=== [Phase 2: PDE + Data Training (Adam)] ===")
         self.adam_phase()
 
-        # L-BFGS typically after Adam
-        print("\n=== [Phase 3: PDE + Data Training (L-BFGS)] ===")
-        self.dataloader_lbfgs = DataLoader(self.dataset, batch_size=self.batch_size_lbfgs, shuffle=True)
-        self.lbfgs_phase()
+
     
     def train_from_checkpoint(self, checkpoint_path: str,phases: list) -> None:
         """
         Load model weights from checkpoint and continue training from there.
         """
+
         if not os.path.isfile(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
@@ -459,9 +463,9 @@ class PINNTrainer:
         if "phase2" in phases:
             print("\n=== [Continuing Phase 2: PDE + Data Training (Adam)] ===")
             self.adam_phase()
-        if "phase3" in phases:
-            print("\n=== [Continuing Phase 3: PDE + Data Training (L-BFGS)] ===")
-            #self.dataloader_lbfgs = DataLoader(self.dataset, batch_size=self.batch_size_lbfgs, shuffle=True)
-            #Use entire dataset for L-BFGS phase
-            self.dataloader_lbfgs = DataLoader(self.dataset, batch_size=self.batch_size_lbfgs, shuffle=False, pin_memory=True, num_workers=2)
-            self.lbfgs_phase()
+
+
+    def sigmoid(x,a, b,iterations_start):
+        iterations_per_epoch = 49075
+        
+        return 1 / (1 + np.exp( -(a*(x-iterations_start)/iterations_per_epoch + b)))
