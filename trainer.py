@@ -10,7 +10,7 @@ from tqdm import tqdm
 import itertools
 from scar_data_module import ScarPINNDataModule, CustomDataset
 from fibernet import FiberNet
-from fibernet import setup_data as setup_fibernet_data
+from case_data import fibernet_training_arrays, fibernet_checkpoint_path
 import matplotlib.pyplot as plt
 
 
@@ -98,7 +98,7 @@ class PINNTrainer:
 
     
     def build_fibernet(self):
-        X,y,mins,maxs = setup_fibernet_data()
+        X,y,mins,maxs = fibernet_training_arrays(self.dm.case_data)
         fibernet = FiberNet(
             input_dim=2,  # x, y
             output_dim=2, # e_fib_x, e_fib_y
@@ -107,12 +107,18 @@ class PINNTrainer:
             mins=mins,
             maxs=maxs
         ).to(self.device)
-        state_dict = torch.load(f"fibernet.pth", map_location=self.device)
+        checkpoint = fibernet_checkpoint_path(self.config, self.dm.case_data.case)
+        state_dict = torch.load(checkpoint, map_location=self.device, weights_only=True)
+        # The frozen scaler is part of the selected geometry's data identity.
+        for key in ("layer_norm.weight", "layer_norm.bias"):
+            if key not in state_dict or not torch.equal(
+                    state_dict[key].detach().cpu(), fibernet.state_dict()[key].detach().cpu()):
+                raise ValueError(f"FiberNet checkpoint scaling does not match {self.dm.case_data.case}: {checkpoint}")
         fibernet.load_state_dict(state_dict)
         fibernet.eval()
         for p in fibernet.parameters():
             p.requires_grad = False
-        print("Loaded pretrained FiberNet with state_dict from fibernet.pth")
+        print(f"Loaded {self.dm.case_data.case} FiberNet from {checkpoint}")
         return fibernet
 
     # -------------------------------------------------------------------------

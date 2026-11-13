@@ -1,13 +1,19 @@
+"""Original PINN-compatible per-case HDF5 loader. No revised physics imports.
+
+Features are [x_mm, y_mm, time_ms/12.9, g_il, region_marker]. Each case has
+its own data module; the original four-input PINN is not given mixed geometries.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Type
+from copy import deepcopy
+from typing import Optional, Tuple, Type
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
-from utils import get_mesh_data, get_boundary
-from utils import get_mesh_data
+from torch.utils.data import DataLoader, Dataset, Sampler
+
+from case_data import CaseData, load_case_data, load_fields, resolve_case, resolve_dataset_path, resolve_cases
 
 def detect_device() -> torch.device:
     if torch.cuda.is_available():
@@ -62,6 +68,11 @@ class ExcludingFlatIndexMap:
         offset = np.searchsorted(self.adjusted, idx, side="right")
         return idx + int(offset)
 
+    def to_flat_array(self, idx: np.ndarray) -> np.ndarray:
+        """Vectorised to_flat for a whole batch of dataset indices."""
+        idx = np.asarray(idx, dtype=np.int64)
+        return idx + np.searchsorted(self.adjusted, idx, side="right")
+
 
 def build_feature_block(
     flat_idx: np.ndarray,
@@ -93,8 +104,8 @@ def build_dense_batch(
     W: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     X, x_idx, t_idx, exp_idx = build_feature_block(flat_idx, x, y, t, g_values, vmark)
-    V = vm[t_idx, x_idx, exp_idx].astype(np.float32, copy=False).reshape(-1, 1)
-    Wb = W[t_idx, x_idx, exp_idx].astype(np.float32, copy=False).reshape(-1, 1)
+    V = vm[exp_idx, t_idx, x_idx].astype(np.float32, copy=False).reshape(-1, 1)
+    Wb = W[exp_idx, t_idx, x_idx].astype(np.float32, copy=False).reshape(-1, 1)
     return X, V, Wb
 
 
@@ -113,194 +124,197 @@ def build_boundary_batch(
 
 
 # -----------------------------
+# Experiment / feature conventions
+#
+# Shared with the plotting and prediction path so the two cannot drift: the
+# PINN's input scaler is fitted on these exact values, and reusing a checkpoint
+# with different mins/maxes silently mis-scales every prediction.
+# -----------------------------
+N_TRAIN_EXPERIMENTS = 12
+
+
+def training_experiment_indices(n_sims: int) -> np.ndarray:
+    """Indices of the experiments used for the data loss.
+
+    Drops every 4th value of the sweep and keeps the first 12, leaving 3
+    interpolation and 4 extrapolation values held out.
+    """
+    indices = np.arange(n_sims)
+    return indices[(indices + 1) % 4 != 0][:N_TRAIN_EXPERIMENTS]
+
+
+def time_axis(n_times: int, dt_ms: float, t_norm: float, slice_t: int = 1) -> np.ndarray:
+    """Normalised time axis the model was trained on (ms / t_norm)."""
+    full = np.arange(n_times, dtype=np.float32) * float(dt_ms) / float(t_norm)
+    return np.asarray(full[::slice_t], dtype=np.float32)
+
+
+def feature_minmax(x, y, t, g_train, vmark) -> tuple[np.ndarray, np.ndarray]:
+    """Per-column min/max of [x, y, t, g_il, marker] for the model's scaler.
+
+    Note g_il spans only the *training* experiments, deliberately: held-out
+    interpolation and extrapolation values scale outside [-1, 1].
+    """
+    mins = np.array(
+        [x.min(), y.min(), t.min(), g_train.min(), vmark.min()], dtype=np.float32
+    )
+    maxes = np.array(
+        [x.max(), y.max(), t.max(), g_train.max(), vmark.max()], dtype=np.float32
+    )
+    return mins, maxes
+
+
+# -----------------------------
+# Samplers
+# -----------------------------
+class RandomBatchSampler(Sampler):
+    """Yields batches of random indices as one array per batch.
+
+    ``replacement=False`` reproduces ordinary shuffling: an epoch is an exact
+    permutation, so every row is seen once. That costs a ``randperm`` of the
+    whole grid, which is fine for the data loss (~2e8 rows) but not for the
+    collocation grid (~8.5e8 rows = a 6.8 GB allocation, rebuilt every time
+    the loader is re-iterated).
+
+    ``replacement=True`` draws each batch independently and allocates nothing.
+    For residual sampling that is the better trade: the collocation and
+    boundary grids are arbitrary sampling grids rather than a fixed training
+    set, and a 4096-row draw from 1e8+ rows collides with negligible
+    probability.
+    """
+
+    def __init__(self, n_samples, batch_size, replacement=False, generator=None):
+        self.n_samples = int(n_samples)
+        self.batch_size = int(batch_size)
+        self.replacement = bool(replacement)
+        self.generator = generator
+        self.num_batches = max(1, -(-self.n_samples // self.batch_size))
+
+    def __len__(self):
+        return self.num_batches
+
+    def __iter__(self):
+        if self.replacement:
+            for _ in range(self.num_batches):
+                yield torch.randint(
+                    self.n_samples, (self.batch_size,), generator=self.generator
+                ).numpy()
+        else:
+            order = torch.randperm(self.n_samples, generator=self.generator).numpy()
+            for start in range(0, self.n_samples, self.batch_size):
+                yield order[start:start + self.batch_size]
+
+
+# -----------------------------
 # Dataset classes
 # -----------------------------
-class CustomDataset(Dataset):
+class LazyFeatureDataset(Dataset):
+    """A (point, time, experiment) grid addressed by one flat index.
+
+    Nothing is materialised: each fetch rebuilds its feature rows
+    ``[x, y, t, g_il, marker]`` on demand, which is what keeps grids of
+    ~1e8-1e9 samples tractable.
+
+    Indexing is **batched**. ``dataset[list_of_indices]`` returns a whole
+    collated batch built with vectorised numpy. Feeding these datasets one
+    index at a time costs ~200x more per sample, enough to make the loader,
+    not the GPU, the bottleneck -- so the DataModule drives them with a
+    BatchSampler and ``batch_size=None``.
     """
-    Backward-compatible dataset.
 
-    Legacy mode:
-        CustomDataset(X, V, W, device)
+    def __init__(self, *, x, y, t, vmark, g_values, device=None):
+        self.device = device
+        self.x = np.ascontiguousarray(x, dtype=np.float32)
+        self.y = np.ascontiguousarray(y, dtype=np.float32)
+        self.t = np.ascontiguousarray(t, dtype=np.float32)
+        self.vmark = np.ascontiguousarray(vmark, dtype=np.float32)
+        self.g_values = np.ascontiguousarray(g_values, dtype=np.float32)
 
-    Lazy mode:
-        CustomDataset(
-            x=..., y=..., t=..., vmark=..., g_values=..., vm=..., W=...,
-            excluded_flat_indices=...
-        )
-    """
-    def __init__(self, *args, **kwargs):
-        self.device = kwargs.pop("device", None)
-
-        if "x" in kwargs:
-            self._mode = "lazy"
-
-            self.x = torch.from_numpy(np.asarray(kwargs["x"], dtype=np.float32))
-            self.y = torch.from_numpy(np.asarray(kwargs["y"], dtype=np.float32))
-            self.t = torch.from_numpy(np.asarray(kwargs["t"], dtype=np.float32))
-            self.vmark = torch.from_numpy(np.asarray(kwargs["vmark"], dtype=np.float32))
-            self.g_values = torch.from_numpy(np.asarray(kwargs["g_values"], dtype=np.float32))
-
-            self.vm = np.asarray(kwargs["vm"], dtype=np.float32)
-            self.W = np.asarray(kwargs["W"], dtype=np.float32)
-
-            self.n_space = self.x.numel()
-            self.n_time = self.t.numel()
-            self.n_exp = self.g_values.numel()
-            excluded = kwargs.get("excluded_flat_indices", None)
-            self.index_map = ExcludingFlatIndexMap(self.n_space * self.n_time * self.n_exp, excluded)
-        else:
-            self._mode = "legacy"
-            self.X = args[0]
-            self.V = args[1]
-            self.W = args[2]
-            self.device = args[3] if len(args) > 3 else self.device
+        self.n_space = self.x.shape[0]
+        self.n_time = self.t.shape[0]
+        self.n_exp = self.g_values.shape[0]
+        self.total_size = self.n_space * self.n_time * self.n_exp
 
     def __len__(self):
-        if self._mode == "lazy":
-            return len(self.index_map)
-        return len(self.X)
+        return self.total_size
 
-    def __getitem__(self, idx):
-        if self._mode == "lazy":
-            flat_idx = self.index_map.to_flat(int(idx))
-            x_idx, t_idx, exp_idx = unravel_flat_index(flat_idx, self.n_space, self.n_time)
+    @staticmethod
+    def _as_index_array(index) -> np.ndarray:
+        if isinstance(index, slice):
+            raise TypeError("slice indexing is not supported; pass a list of indices")
+        return np.atleast_1d(np.asarray(index, dtype=np.int64))
 
-            X = torch.stack((
-                self.x[x_idx],
-                self.y[x_idx],
-                self.t[t_idx],
-                self.g_values[exp_idx],
-                self.vmark[x_idx],
-            ))
-            V = torch.tensor([self.vm[t_idx, x_idx, exp_idx]], dtype=torch.float32)
-            W = torch.tensor([self.W[t_idx, x_idx, exp_idx]], dtype=torch.float32)
-            return {"X": X, "V": V, "W": W}
+    def _to_flat(self, index) -> np.ndarray:
+        """Dataset indices -> flat grid indices. Overridden where rows are held out."""
+        return self._as_index_array(index)
 
+    def _features(self, index):
+        flat = self._to_flat(index)
+        X, x_idx, t_idx, exp_idx = build_feature_block(
+            flat, self.x, self.y, self.t, self.g_values, self.vmark
+        )
+        return torch.from_numpy(X), x_idx, t_idx, exp_idx
+
+    def __getitem__(self, index):
+        X, _, _, _ = self._features(index)
+        return {"X": X}
+
+
+class CustomDataset(LazyFeatureDataset):
+    """Data-loss samples on the mesh vertices, carrying Vm and W targets.
+
+    ``excluded_flat_indices`` holds the held-out test rows, skipped without
+    materialising the complementary index array.
+    """
+
+    def __init__(self, *, vm, W, excluded_flat_indices=None, **kwargs):
+        super().__init__(**kwargs)
+        self.vm = np.asarray(vm, dtype=np.float32)
+        self.W = np.asarray(W, dtype=np.float32)
+        self.index_map = ExcludingFlatIndexMap(self.total_size, excluded_flat_indices)
+
+    def __len__(self):
+        return len(self.index_map)
+
+    def _to_flat(self, index) -> np.ndarray:
+        return self.index_map.to_flat_array(self._as_index_array(index))
+
+    def __getitem__(self, index):
+        X, x_idx, t_idx, exp_idx = self._features(index)
         return {
-            "X": self.X[idx, :],
-            "V": self.V[idx],
-            "W": self.W[idx],
+            "X": X,
+            "V": torch.from_numpy(
+                self.vm[exp_idx, t_idx, x_idx].reshape(-1, 1).astype(np.float32, copy=False)
+            ),
+            "W": torch.from_numpy(
+                self.W[exp_idx, t_idx, x_idx].reshape(-1, 1).astype(np.float32, copy=False)
+            ),
         }
 
 
-class CollocationDataset(Dataset):
-    """
-    Backward-compatible collocation dataset.
-
-    Legacy mode:
-        CollocationDataset(X, device)
-
-    Lazy mode:
-        CollocationDataset(
-            x=..., y=..., t=..., vmark=..., g_values=...
-        )
-    """
-    def __init__(self, *args, **kwargs):
-        self.device = kwargs.pop("device", None)
-
-        if "x" in kwargs:
-            self._mode = "lazy"
-
-            self.x = torch.from_numpy(np.asarray(kwargs["x"], dtype=np.float32))
-            self.y = torch.from_numpy(np.asarray(kwargs["y"], dtype=np.float32))
-            self.t = torch.from_numpy(np.asarray(kwargs["t"], dtype=np.float32))
-            self.vmark = torch.from_numpy(np.asarray(kwargs["vmark"], dtype=np.float32))
-            self.g_values = torch.from_numpy(np.asarray(kwargs["g_values"], dtype=np.float32))
-
-            self.n_space = self.x.numel()
-            self.n_time = self.t.numel()
-            self.n_exp = self.g_values.numel()
-            self.total_size = self.n_space * self.n_time * self.n_exp
-        else:
-            self._mode = "legacy"
-            self.X = args[0]
-            self.device = args[1] if len(args) > 1 else self.device
-
-    def __len__(self):
-        if self._mode == "lazy":
-            return self.total_size
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        if self._mode == "lazy":
-            x_idx, t_idx, exp_idx = unravel_flat_index(int(idx), self.n_space, self.n_time)
-            X = torch.stack((
-                self.x[x_idx],
-                self.y[x_idx],
-                self.t[t_idx],
-                self.g_values[exp_idx],
-                self.vmark[x_idx],
-            ))
-            return {"X": X}
-
-        return {
-            "X": self.X[idx, :],
-        }
+class CollocationDataset(LazyFeatureDataset):
+    """PDE-residual samples on the triangle centroids."""
 
 
-class BoundaryDataset(Dataset):
-    """
-    Backward-compatible boundary dataset.
+class BoundaryDataset(LazyFeatureDataset):
+    """No-flux BC samples on the boundary edge centroids, with outward normals."""
 
-    Legacy mode:
-        BoundaryDataset(X, X_normals, device)
+    def __init__(self, *, normals, **kwargs):
+        super().__init__(**kwargs)
+        self.normals = np.ascontiguousarray(normals, dtype=np.float32)
 
-    Lazy mode:
-        BoundaryDataset(
-            x=..., y=..., t=..., vmark=..., g_values=..., normals=...
-        )
-    """
-    def __init__(self, *args, **kwargs):
-        self.device = kwargs.pop("device", None)
+    def __getitem__(self, index):
+        X, x_idx, _, _ = self._features(index)
+        return {"X": X, "X_normals": torch.from_numpy(self.normals[x_idx])}
 
-        if "x" in kwargs:
-            self._mode = "lazy"
 
-            self.x = torch.from_numpy(np.asarray(kwargs["x"], dtype=np.float32))
-            self.y = torch.from_numpy(np.asarray(kwargs["y"], dtype=np.float32))
-            self.t = torch.from_numpy(np.asarray(kwargs["t"], dtype=np.float32))
-            self.vmark = torch.from_numpy(np.asarray(kwargs["vmark"], dtype=np.float32))
-            self.g_values = torch.from_numpy(np.asarray(kwargs["g_values"], dtype=np.float32))
-            self.normals = torch.from_numpy(np.asarray(kwargs["normals"], dtype=np.float32))
-
-            self.n_space = self.x.numel()
-            self.n_time = self.t.numel()
-            self.n_exp = self.g_values.numel()
-            self.total_size = self.n_space * self.n_time * self.n_exp
-        else:
-            self._mode = "legacy"
-            self.X = args[0]
-            self.X_normals = args[1]
-            self.device = args[2] if len(args) > 2 else self.device
-
-    def __len__(self):
-        if self._mode == "lazy":
-            return self.total_size
-        return len(self.X)
-
-    def __getitem__(self, idx):
-        if self._mode == "lazy":
-            x_idx, t_idx, exp_idx = unravel_flat_index(int(idx), self.n_space, self.n_time)
-            X = torch.stack((
-                self.x[x_idx],
-                self.y[x_idx],
-                self.t[t_idx],
-                self.g_values[exp_idx],
-                self.vmark[x_idx],
-            ))
-            X_normals = self.normals[x_idx]
-            return {"X": X, "X_normals": X_normals}
-
-        return {
-            "X": self.X[idx, :],
-            "X_normals": self.X_normals[idx, :],
-        }
 # -----------------------------
 # DataModule
 # -----------------------------
 @dataclass
 class ScarPINNDataModule:
     config: dict
+    case: Optional[str] = None
     dataset_class: Type[Dataset] = CustomDataset
     collocation_dataset_class: Type[Dataset] = CollocationDataset
     boundary_dataset_class: Type[Dataset] = BoundaryDataset
@@ -315,25 +329,43 @@ class ScarPINNDataModule:
     V_test: Optional[torch.Tensor] = None
     W_test: Optional[torch.Tensor] = None
 
-    X_collocation_train: Optional[torch.Tensor] = None
     X_boundary: Optional[torch.Tensor] = None
     X_normals: Optional[torch.Tensor] = None
     X_ic_train: Optional[torch.Tensor] = None
     V_ic_train: Optional[torch.Tensor] = None
     W_ic_train: Optional[torch.Tensor] = None
 
-    
-    features_all_numpy: Optional[np.ndarray] = None
-    features_boundary_all: Optional[np.ndarray] = None
-    features_collocation: Optional[np.ndarray] = None
-    features_ic_all_numpy: Optional[np.ndarray] = None
-    X_normals_all: Optional[np.ndarray] = None
-    v_flat_numpy: Optional[np.ndarray] = None
-    W_flat_numpy: Optional[np.ndarray] = None
 
     # Min/max tensors
     mins: Optional[torch.Tensor] = None
     maxes: Optional[torch.Tensor] = None
+
+    # Geometry and point sets for the selected case
+    case_data: Optional[CaseData] = None
+
+    def _make_loader(
+        self, dataset, batch_size: int, num_workers: int, replacement: bool = False
+    ) -> DataLoader:
+        """Loader that fetches one whole batch per dataset call.
+
+        The sampler hands the dataset an array of indices and ``batch_size=None``
+        disables auto-collation, so a batch is assembled with vectorised numpy
+        instead of 4096 Python-level __getitem__ calls plus a collate. That is
+        ~200x cheaper per batch and is what keeps the GPU, rather than the
+        loader workers, as the bottleneck.
+        """
+        sampler = RandomBatchSampler(
+            len(dataset), batch_size, replacement=replacement
+        )
+        kwargs = dict(
+            sampler=sampler,
+            batch_size=None,          # sampler already yields batches
+            num_workers=num_workers,
+            pin_memory=(self.device.type == "cuda"),
+        )
+        if num_workers > 0:
+            kwargs.update(persistent_workers=True, prefetch_factor=2)
+        return DataLoader(dataset, **kwargs)
 
     def setup_data(self):
         print("Loading data")
@@ -341,22 +373,9 @@ class ScarPINNDataModule:
             self.device = detect_device()
         print("Using device:", self.device)
 
-        phys = self.config["MODEL"]["physics"]
-        self.a = float(phys.get("a", 0.15))
-        self.k = float(phys.get("k", 8.0))
-        self.mu1 = float(phys.get("mu1", 0.2))
-        self.mu2 = float(phys.get("mu2", 0.3))
-        self.eps = float(phys.get("eps", 0.002))
-        self.b = float(phys.get("b", 0.15))
-        self.h = float(phys.get("h", 0.1))
-        self.beta = float(phys.get("beta", 1.4e-5))
-        self.Cm = float(phys.get("Cm", 1e-3))
-        self.mS_cm = float(phys.get("mS_cm", 10.0))
-        self.vm_rest = float(phys.get("vm_rest", -80.0))
-        self.vm_norm = float(phys.get("vm_norm", 100.0))
-        self.t_norm = float(phys.get("t_norm", 12.9))
-        self.touAcm2 = 100 / 12.9
-        self.tomAcm2 = 100 * 1e-3 / 12.9
+        # Only the time normaliser is needed here; the PINN reads the rest of
+        # MODEL.physics from the config itself.
+        self.t_norm = float(self.config["MODEL"].get("physics", {}).get("t_norm", 12.9))
 
         cfgD = self.config["DATA"]
         slice_t = cfgD["sampling"]["slice_t"]
@@ -368,49 +387,48 @@ class ScarPINNDataModule:
 
         batch_size = cfgD["loader"]["batch_size"]
         self.batch_size_lbfgs = cfgD["loader"]["batch_size_lbfgs"]
+        num_workers = int(cfgD["loader"].get("num_workers", 4))
 
         umtomm = cfgD["constants"]["um_to_mm"]
 
         np.random.seed(42)
 
         # -----------------
-        # Load geometry
+        # Load geometry, point sets and fields for this case
         # -----------------
-        vertices, _, _ = get_mesh_data()
-        vertices = np.asarray(vertices[:, :2] * umtomm, dtype=np.float32)
-        vmark = np.load("./data/vertex_markers.npy").astype(np.float32, copy=False)
+        self.case = resolve_case(self.config, self.case)
+        dataset_path = resolve_dataset_path(self.config, self.case)
+        data = load_case_data(self.case, dataset_path)
+        self.case_data = data
+        print(f"Dataset: {dataset_path}")
+        print(f"Geometry: {data.summary()}")
+
+        vertices = data.vertices          # (V, 2), already in mm
+        vmark = data.vertex_markers
 
         # -----------------
         # Experiment selection
         # -----------------
-        g_il_values = np.array([
-            0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1
-        ], dtype=np.float32)
-
-        indices_experiments = np.arange(len(g_il_values))
-        sampled_indices = indices_experiments[(indices_experiments + 1) % 4 != 0][:12]
-        indices_collocation = sampled_indices
+        g_il_values = data.g_il
+        sampled_indices = training_experiment_indices(len(g_il_values))
 
         g_train = g_il_values[sampled_indices]
-        g_collocation = g_il_values#[indices_collocation]
+        g_collocation = g_il_values
 
         # -----------------
-        # Load time series
+        # Load time series as (n_exp, n_time, n_space)
         # -----------------
-        vm_all = np.load("./data/vm_variation_scar_full.npy", mmap_mode="r")
-        W_all = np.load("./data/W_variation_scar_full.npy", mmap_mode="r")
+        vm_train, W_train = load_fields(dataset_path, sampled_indices, slice_t=slice_t)
+        print(
+            f"Fields: vm {vm_train.shape} "
+            f"({vm_train.nbytes / 2**30:.2f} GiB x2), "
+            f"experiments {np.round(g_train, 4).tolist()}"
+        )
 
-        n_timepoints = vm_all.shape[0]
-        dt = 5.0
-        t_full = np.linspace(0.0, (n_timepoints - 1) * dt, n_timepoints, dtype=np.float32) / self.t_norm
-        t = np.asarray(t_full[::slice_t], dtype=np.float32)
-
-        vm_train = np.asarray(vm_all[::slice_t, :, :][:, :, sampled_indices], dtype=np.float32)
-        W_train = np.asarray(W_all[::slice_t, :, :][:, :, sampled_indices], dtype=np.float32)
+        t = time_axis(data.n_times, data.dt_ms, self.t_norm, slice_t)
 
         # -----------------
-        # Spatial bases
+        # Spatial bases (data loss lives on the mesh vertices)
         # -----------------
         x = vertices[:, 0]
         y = vertices[:, 1]
@@ -421,31 +439,31 @@ class ScarPINNDataModule:
         t_ic = t[:ic_time_steps]
 
         # -----------------
-        # Collocation bases
+        # Collocation bases: triangle centroids. A centroid carries its own
+        # triangle's exact region tag. Fibers remain a FiberNet approximation;
+        # the original PINN uses the lazily assembled centroid/time/g grid.
         # -----------------
-        collocation_points = np.load("./data/collocation_points.npy").astype(np.float32) * umtomm
-        collocation_markers = np.load("./data/collocation_markers.npy").astype(np.float32, copy=False)
-
-        x_inner = collocation_points[:, 0]
-        y_inner = collocation_points[:, 1]
-        vmark_inner = collocation_markers
+        x_inner = data.collocation_points[:, 0]
+        y_inner = data.collocation_points[:, 1]
+        vmark_inner = data.collocation_markers
 
         # -----------------
-        # Boundary bases
+        # Boundary bases: edge centroids with outward normals. Includes the
+        # interior loops left by the triangles removed from the scar, not just
+        # the outer wall.
         # -----------------
-        vertices_boundary = np.load("./data/boundary_edge_centroids.npy").astype(np.float32) * umtomm
-        vertices_boundary = vertices_boundary[:, :2]
-        boundary_normals = np.load("./data/boundary_normals.npy").astype(np.float32)[:, :2]
-        vmark_boundary = np.load("./data/boundary_markers.npy").astype(np.float32, copy=False)
-
-        x_boundary = vertices_boundary[:, 0]
-        y_boundary = vertices_boundary[:, 1]
+        boundary_normals = data.boundary_normals
+        vmark_boundary = data.boundary_markers
+        x_boundary = data.boundary_points[:, 0]
+        y_boundary = data.boundary_points[:, 1]
 
         # -----------------
         # Random sampled test set (excluded from train)
         # -----------------
         total_dense = vm_train.shape[0] * vm_train.shape[1] * vm_train.shape[2]
-        num_test_samples = min(1024, total_dense)
+        num_test_samples = min(int(cfgD["sampling"].get("num_test_samples", 1024)), total_dense - 1)
+        if total_dense < 2 or num_test_samples < 1:
+            raise ValueError("Need at least one training row and one held-out row")
 
         idx_test = np.sort(
             np.random.choice(total_dense, num_test_samples, replace=False).astype(np.int64)
@@ -481,18 +499,7 @@ class ScarPINNDataModule:
             device=self.device,
         )
 
-        loader_kwargs = dict(
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=(self.device.type == "cuda"),
-            persistent_workers=True,
-            prefetch_factor=2
-        )
-        if loader_kwargs["num_workers"] > 0:
-            loader_kwargs["prefetch_factor"] = 2
-
-        self.dataloader = DataLoader(self.dataset, **loader_kwargs)
+        self.dataloader = self._make_loader(self.dataset, batch_size, num_workers)
         num_batches = len(self.dataloader)
         print(f"Training data: {len(self.dataset)} samples, {num_batches} batches of size {batch_size}")
         self.config["DATA"]["loader"]["num_batches"] = num_batches
@@ -509,36 +516,14 @@ class ScarPINNDataModule:
             device=self.device,
         )
 
-        colloc_loader_kwargs = dict(
-            batch_size=self.num_domain,
-            shuffle=True,
-            num_workers=0,
-            #pin_memory=(self.device.type == "cuda"),
-            #persistent_workers=True,
-            prefetch_factor=None
+        self.collocation_dataloader = self._make_loader(
+            self.collocation_dataset, self.num_domain, num_workers
         )
-        #if colloc_loader_kwargs["num_workers"] > 0:
-        #    colloc_loader_kwargs["prefetch_factor"] = 2
 
-        self.collocation_dataloader = DataLoader(self.collocation_dataset, **colloc_loader_kwargs)
-
-        total_collocation = x_inner.shape[0] * t.shape[0] * g_collocation.shape[0]
-        idx_colocation = np.random.choice(total_collocation, self.num_domain, replace=False)
-        X_collocation_numpy, _, _, _ = build_feature_block(
-            idx_colocation,
-            x=x_inner,
-            y=y_inner,
-            t=t,
-            g_values=g_collocation,
-            vmark=vmark_inner,
+        print(
+            f"Collocation data: {len(self.collocation_dataset)} samples, "
+            f"batch size {self.num_domain}"
         )
-        self.X_collocation_train = torch.tensor(X_collocation_numpy, dtype=torch.float32, device=self.device)
-
-        print(f"Collocation data: {len(self.collocation_dataset)} samples, collocation batch size {self.num_domain}")
-        collocation_data_size_gb = (
-            self.X_collocation_train.element_size() * self.X_collocation_train.nelement() / (1024 ** 3)
-        )
-        print(f"Sampled collocation tensor size: {collocation_data_size_gb:.4f} GB")
 
         boundary_batch_size = cfgD["loader"].get("boundary_batch_size", self.num_boundary)
 
@@ -552,17 +537,9 @@ class ScarPINNDataModule:
             device=self.device,
         )
 
-        boundary_loader_kwargs = dict(
-            batch_size=boundary_batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=(self.device.type == "cuda"),
-            persistent_workers=True,
-            prefetch_factor=2
+        self.boundary_dataloader = self._make_loader(
+            self.boundary_dataset, boundary_batch_size, num_workers
         )
-        
-
-        self.boundary_dataloader = DataLoader(self.boundary_dataset, **boundary_loader_kwargs)
 
         print(f"Boundary data: {len(self.boundary_dataset)} samples, {len(self.boundary_dataloader)} batches of size {boundary_batch_size}")
 
@@ -588,8 +565,8 @@ class ScarPINNDataModule:
         # -----------------
         # IC sampled tensor
         # -----------------
-        vm_ic = vm_train[:ic_time_steps, ::ic_space_slice, :]
-        W_ic = W_train[:ic_time_steps, ::ic_space_slice, :]
+        vm_ic = vm_train[:, :ic_time_steps, ::ic_space_slice]
+        W_ic = W_train[:, :ic_time_steps, ::ic_space_slice]
 
         total_ic = x_ic.shape[0] * t_ic.shape[0] * g_train.shape[0]
         idx_ic = np.random.choice(total_ic, self.num_init, replace=False)
@@ -609,427 +586,24 @@ class ScarPINNDataModule:
         self.V_ic_train = torch.tensor(V_ic_numpy, dtype=torch.float32, device=self.device)
         self.W_ic_train = torch.tensor(W_ic_numpy, dtype=torch.float32, device=self.device)
 
-        # -----------------
-        # Compatibility placeholders
-        # -----------------
-        self.features_all_numpy = None
-        self.features_boundary_all = None
-        self.features_collocation = None
-        self.features_ic_all_numpy = None
-        self.X_normals_all = None
-        self.v_flat_numpy = None
-        self.W_flat_numpy = None
-
-        self.X_data_train_cpu = None
-        self.V_data_train_cpu = None
-        self.W_data_train_cpu = None
+        # Bases kept for resample(): rebuilding the boundary batch from these
+        # is far cheaper than materialising every (point, time, g) feature row.
+        self._boundary_base = dict(
+            x=x_boundary,
+            y=y_boundary,
+            t=t,
+            g_values=g_collocation,
+            vmark=vmark_boundary,
+            normals=boundary_normals,
+        )
 
         # -----------------
         # Min/Max over feature columns
         # -----------------
-        mins_numpy = np.array([
-            x.min(),
-            y.min(),
-            t.min(),
-            g_train.min(),
-            vmark.min(),
-        ], dtype=np.float32)
-
-        maxes_numpy = np.array([
-            x.max(),
-            y.max(),
-            t.max(),
-            g_train.max(),
-            vmark.max(),
-        ], dtype=np.float32)
+        mins_numpy, maxes_numpy = feature_minmax(x, y, t, g_train, vmark)
 
         self.mins = torch.tensor(mins_numpy, dtype=torch.float32, device=self.device)
         self.maxes = torch.tensor(maxes_numpy, dtype=torch.float32, device=self.device)
-
-
-    def setup_data_with_conductivities(self):
-        """
-        Loads geometry/data from disk and processes into:
-        - train_loader (DataLoader)
-        - test tensors (quick eval)
-        - boundary arrays (for BC)
-        - collocation arrays (for PDE)
-        - initial-condition arrays (for IC)
-        - input min/max tensors (computed from the training data)
-        """
-        # -----------------
-        # Device
-        # -----------------
-        print("Loading data")
-        if self.device is None:
-            self.device = detect_device()
-        print("Using device:", self.device)
-
-        # -----------------
-        # Constants & config
-        # -----------------
-        phys = self.config["MODEL"]["physics"]
-        self.a   = float(phys.get("a", 0.15))
-        self.k   = float(phys.get("k", 8.0))
-        self.mu1 = float(phys.get("mu1", 0.2))
-        self.mu2 = float(phys.get("mu2", 0.3))
-        self.eps = float(phys.get("eps", 0.002))
-        self.b   = float(phys.get("b", 0.15))
-        self.h   = float(phys.get("h", 0.1))
-        self.beta = float(phys.get("beta", 1.4e-5))
-        self.Cm   = float(phys.get("Cm", 1e-3))
-        self.mS_cm = float(phys.get("mS_cm", 10.0))
-        self.vm_rest = float(phys.get("vm_rest", -80.0))  # mV
-        self.vm_norm = float(phys.get("vm_norm", 100.0))
-        self.t_norm = float(phys.get("t_norm",12.9))
-        self.touAcm2 = 100 / 12.9
-        self.tomAcm2 = 100 * 1e-3 / 12.9
-
-        cfgD = self.config["DATA"]
-        slice_t = cfgD["sampling"]["slice_t"]
-        self.num_domain = cfgD["sampling"]["num_domain"]
-        self.num_boundary = cfgD["sampling"]["num_boundary"]
-        self.num_init = cfgD["sampling"]["num_init"]
-        ic_space_slice = cfgD["sampling"]["ic_space_slice"]
-        ic_time_steps = cfgD["sampling"]["ic_time_steps"]
-        nx_test_slice = cfgD["sampling"]["nx_test_slice"]
-        nt_test_slice = cfgD["sampling"]["nt_test_slice"]
-        indices_collocation = cfgD["sampling"]["indices_collocation"]
-        #if string and string is "all",pick all indices
-        if isinstance(indices_collocation, str) and indices_collocation == "all":
-                indices_collocation = list(range(19))
-        
-
-        batch_size = cfgD["loader"]["batch_size"]
-        self.batch_size_lbfgs = cfgD["loader"]["batch_size_lbfgs"]
-
-        umtomm = cfgD["constants"]["um_to_mm"]#1e-3
-        s_mtomm2_TU = 12.9/1.4 #cfgD["constants"]["s_mtomm2_TU"] # 12.9/1.4
-
-        np.random.seed(42)
-
-        # -----------------
-        # Load data
-        # -----------------
-        vertices, triangles, _ = get_mesh_data()
-        vertices = (vertices * umtomm)  # mm
-
-        g_il_values = np.array([
-            0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
-            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1
-        ])
-        indices_experiments = np.arange(len(g_il_values))
-        sampled_indices = indices_experiments[(indices_experiments + 1) % 4 != 0][:12]
-        #print("############# Sampled indices #############", sampled_indices)
-        #print("g_il_values in training data", g_il_values[sampled_indices])
-
-        vm_all = np.load("./data/vm_variation_scar_full.npy")
-
-        W_all = np.load("./data/W_variation_scar_full.npy")
-
-        n_timepoints = vm_all.shape[0]
-        dt = 5
-        t = np.linspace(0, (n_timepoints - 1) * dt, n_timepoints) / self.t_norm
-
-        t_test = t[::nt_test_slice]
-        t = t[::slice_t]
-
-        x_test = vertices[::nx_test_slice, 0]
-        y_test = vertices[::nx_test_slice, 1]
-        indices_test = [-1]
-
-        vm_test = vm_all[::nt_test_slice, ::nx_test_slice, indices_test]
-
-        vm_all = vm_all[::slice_t, :, sampled_indices]
-        W_test = W_all[::nt_test_slice, ::nx_test_slice, indices_test]
-        W_all = W_all[::slice_t, :, sampled_indices]
-
-        conductivities_all = np.load('./data/conductivities_variation_scar_full.npy')
-        conductivities_boundary = np.load("./data/conductivities_boundary_1.npy")
-        conductivities_all = conductivities_all * s_mtomm2_TU
-
-        indices_collocation = [0, 1,2, 3, 14, 16, 18]
-        conductivities_collocation = conductivities_all[:, :, :, indices_collocation]
-        conductivities_test = conductivities_all[::nx_test_slice, :, :, indices_test]
-        conductivities_all = conductivities_all[:, :, :, sampled_indices]
-        conductivities_boundary = (conductivities_boundary * s_mtomm2_TU)[:, :, :, indices_collocation]
-
-        # Boundary points and normals
-        vertices_boundary = np.load("./data/boundary_edge_centroids.npy") * umtomm
-        vertices_boundary = vertices_boundary[:, :2]
-        boundary_points_old, triangles_boundary_old = get_boundary()
-        boundary_points_old = boundary_points_old[:, :2] * umtomm
-        boundary_normals = np.load("./data/boundary_normals.npy")[:, :2]
-
-        # Excluding boundary points from vertices
-        vertices_expanded = vertices[:, np.newaxis]
-        boundary_vertices_expanded = boundary_points_old[np.newaxis, :]
-        is_vertex_on_boundary = np.any(
-            np.all(vertices_expanded == boundary_vertices_expanded, axis=-1), axis=-1
-        )
-        b_verts = vertices[is_vertex_on_boundary, :]
-        np.save("./data/boundary_points_old.npy", b_verts)
-        unique_vertices = vertices[~is_vertex_on_boundary, :]
-        inner_points_indices = np.load("./data/inner_points_indices.npy")
-        x_inner = vertices[inner_points_indices, 0]
-        y_inner = vertices[inner_points_indices, 1]
-
-        X_inner,T_inner = np.meshgrid(x_inner,t)
-        Y_inner,T_inner = np.meshgrid(y_inner,t)
-        X_inner = X_inner.reshape(-1,1)
-        T_inner = T_inner.reshape(-1,1)
-        Y_inner = Y_inner.reshape(-1,1)
-
-        sigma_a_collocation = conductivities_collocation[inner_points_indices, 0, 0, :]
-        sigma_b_collocation = conductivities_collocation[inner_points_indices, 0, 1, :]
-        sigma_c_collocation = conductivities_collocation[inner_points_indices, 1, 0, :]
-        sigma_d_collocation = conductivities_collocation[inner_points_indices, 1, 1, :]
-
-        vm_all_inner = vm_all[:, ~is_vertex_on_boundary, :]
-        W_all_inner = W_all[:, ~is_vertex_on_boundary, :]
-        conductivities_all = conductivities_all[~is_vertex_on_boundary, :, :, :]
-
-        # Space/time grids
-        x = unique_vertices[:, 0]
-        y = unique_vertices[:, 1]
-        x_ic = unique_vertices[::ic_space_slice, 0]
-        y_ic = unique_vertices[::ic_space_slice, 1]
-
-        X, T = np.meshgrid(x, t)
-        Y, T = np.meshgrid(y, t)
-        X = X.reshape(-1, 1)
-        T = T.reshape(-1, 1)
-        Y = Y.reshape(-1, 1)
-
-        X_test, T_test = np.meshgrid(x_test, t_test)
-        Y_test, T_test = np.meshgrid(y_test, t_test)
-        X_test = X_test.reshape(-1, 1)
-        T_test = T_test.reshape(-1, 1)
-        Y_test = Y_test.reshape(-1, 1)
-        V_test = vm_test.reshape(-1, 1)
-        W_test = W_test.reshape(-1, 1)
-
-        # Boundary meshgrid
-        x_boundary = vertices_boundary[:, 0]
-        y_boundary = vertices_boundary[:, 1]
-        X_boundary, T_boundary = np.meshgrid(x_boundary, t)
-        Y_boundary, T_boundary = np.meshgrid(y_boundary, t)
-        X_boundary = X_boundary.reshape(-1, 1)
-        T_boundary = T_boundary.reshape(-1, 1)
-        Y_boundary = Y_boundary.reshape(-1, 1)
-
-        # Boundary normals grids
-        X_boundary_normals, T_boundary_normals = np.meshgrid(boundary_normals[:, 0], t)
-        Y_boundary_normals, T_boundary_normals = np.meshgrid(boundary_normals[:, 1], t)
-        X_boundary_normals = X_boundary_normals.reshape(-1, 1)
-        Y_boundary_normals = Y_boundary_normals.reshape(-1, 1)
-        X_normals = np.hstack((X_boundary_normals, Y_boundary_normals))
-        self.X_normals_all = np.zeros((X_boundary.shape[0] * vm_test.shape[1], 2), dtype=np.float32)
-
-        # Conductivities split
-        self.conductivities_all = conductivities_all[:, :, :, :]
-        sigma_a_train = self.conductivities_all[:, 0, 0, :]
-        sigma_b_train = self.conductivities_all[:, 0, 1, :]
-        sigma_c_train = self.conductivities_all[:, 1, 0, :]
-        sigma_d_train = self.conductivities_all[:, 1, 1, :]
-        sigma_a_ic = conductivities_all[::ic_space_slice, 0, 0, :]
-        sigma_b_ic = conductivities_all[::ic_space_slice, 0, 1, :]
-        sigma_c_ic = conductivities_all[::ic_space_slice, 1, 0, :]
-        sigma_d_ic = conductivities_all[::ic_space_slice, 1, 1, :]
-
-        X_c, T_c = np.meshgrid(x, t)
-
-        # Test conductivities (meshed over t_test)
-        sigma_a_test = conductivities_test[:, 0, 0]
-        sigma_b_test = conductivities_test[:, 0, 1]
-        sigma_c_test = conductivities_test[:, 1, 0]
-        sigma_d_test = conductivities_test[:, 1, 1]
-        sigma_a_test, _ = np.meshgrid(sigma_a_test, t_test)
-        sigma_b_test, _ = np.meshgrid(sigma_b_test, t_test)
-        sigma_c_test, _ = np.meshgrid(sigma_c_test, t_test)
-        sigma_d_test, _ = np.meshgrid(sigma_d_test, t_test)
-        sigma_a_test = sigma_a_test.reshape(-1, 1)
-        sigma_b_test = sigma_b_test.reshape(-1, 1)
-        sigma_c_test = sigma_c_test.reshape(-1, 1)
-        sigma_d_test = sigma_d_test.reshape(-1, 1)
-        experiment_feature_test = np.ones(sigma_a_test.shape) * (g_il_values[-1])
-        features_test_numpy = np.hstack((
-            X_test, Y_test, T_test, sigma_a_test, sigma_b_test, sigma_c_test, sigma_d_test, experiment_feature_test
-        ))
-
-        # IC grids
-        t_ic = t[:ic_time_steps]
-        X_ic, T_ic = np.meshgrid(x_ic, t_ic)
-        Y_ic, T_ic = np.meshgrid(y_ic, t_ic)
-        X_ic = X_ic.reshape(-1, 1)
-        T_ic = T_ic.reshape(-1, 1)
-        Y_ic = Y_ic.reshape(-1, 1)
-
-        vm_train = vm_all_inner[:, :, :]
-        W_train = W_all_inner[:, :, :]
-
-        self.features_all_numpy = np.zeros((vm_train.shape[0] * vm_train.shape[1] * vm_train.shape[2], 8))
-        self.features_collocation = np.zeros((X_inner.shape[0] * sigma_a_collocation.shape[-1], 8))
-        self.features_boundary_all = np.zeros((x_boundary.shape[0] * t.shape[0] * conductivities_boundary.shape[-1], 8))
-        self.features_ic_all_numpy = np.zeros((X_ic.shape[0] * vm_train.shape[2], 8), dtype=np.float32)
-        self.V_ic_all_numpy = np.zeros((X_ic.shape[0] * vm_train.shape[2], 1), dtype=np.float32)
-        self.W_ic_all_numpy = np.zeros((X_ic.shape[0] * vm_train.shape[2], 1), dtype=np.float32)
-        self.v_flat_numpy = np.zeros((vm_train.shape[0] * vm_train.shape[1] * vm_train.shape[2], 1))
-        self.W_flat_numpy = np.zeros((W_train.shape[0] * W_train.shape[1] * W_train.shape[2], 1))
-
-        # Collocation features 
-        for i in range(conductivities_collocation.shape[3]):
-            start = i *X_inner.shape[0]
-            end = (i + 1) * X_inner.shape[0]
-
-            sigma_a_collocation_mesh, _ = np.meshgrid(sigma_a_collocation[:, i], t)
-            sigma_b_collocation_mesh, _ = np.meshgrid(sigma_b_collocation[:, i], t)
-            sigma_c_collocation_mesh, _ = np.meshgrid(sigma_c_collocation[:, i], t)
-            sigma_d_collocation_mesh, _ = np.meshgrid(sigma_d_collocation[:, i], t)
-            sigma_a_collocation_flat = sigma_a_collocation_mesh.reshape(-1, 1)
-            sigma_b_collocation_flat = sigma_b_collocation_mesh.reshape(-1, 1)
-            sigma_c_collocation_flat = sigma_c_collocation_mesh.reshape(-1, 1)
-            sigma_d_collocation_flat = sigma_d_collocation_mesh.reshape(-1, 1)
-            experiment_feature = np.ones(sigma_a_collocation_flat.shape) * g_il_values[indices_collocation[i]]
-            Xi_collocation = np.hstack((
-                X_inner, Y_inner, T_inner,
-                sigma_a_collocation_flat, sigma_b_collocation_flat,
-                sigma_c_collocation_flat, sigma_d_collocation_flat,
-                experiment_feature,
-            ))
-            self.features_collocation[start:end, :] = Xi_collocation
-
-            # Boundary points for this collocation experiment
-            sigma_a_boundary = conductivities_boundary[:, 0, 0, i]
-            sigma_b_boundary = conductivities_boundary[:, 0, 1, i]
-            sigma_c_boundary = conductivities_boundary[:, 1, 0, i]
-            sigma_d_boundary = conductivities_boundary[:, 1, 1, i]
-            sigma_a_boundary, _ = np.meshgrid(sigma_a_boundary, t)
-            sigma_b_boundary, _ = np.meshgrid(sigma_b_boundary, t)
-            sigma_c_boundary, _ = np.meshgrid(sigma_c_boundary, t)
-            sigma_d_boundary, _ = np.meshgrid(sigma_d_boundary, t)
-            sigma_a_boundary = sigma_a_boundary.reshape(-1, 1)
-            sigma_b_boundary = sigma_b_boundary.reshape(-1, 1)
-            sigma_c_boundary = sigma_c_boundary.reshape(-1, 1)
-            sigma_d_boundary = sigma_d_boundary.reshape(-1, 1)
-            start_bc = i * X_boundary.shape[0]
-            end_bc = (i + 1) * X_boundary.shape[0]
-            experiment_feature = np.ones(sigma_a_boundary.shape) * g_il_values[indices_collocation[i]]
-            self.features_boundary_all[start_bc:end_bc, :] = np.hstack((
-                X_boundary, Y_boundary, T_boundary,
-                sigma_a_boundary, sigma_b_boundary, sigma_c_boundary, sigma_d_boundary,
-                experiment_feature,
-            ))
-            # normals
-            start_normals = i * X_normals.shape[0]
-            end_normals = (i + 1) * X_normals.shape[0]
-            self.X_normals_all[start_normals:end_normals, :] = X_normals
-
-        # Dense training features per experiment
-        for i in range(vm_train.shape[2]):
-            start = i * vm_train.shape[0] * vm_train.shape[1]
-            end = (i + 1) * vm_train.shape[0] * vm_train.shape[1]
-            self.v_flat_numpy[start:end] = vm_train[:, :, i].reshape(-1, 1)
-            self.W_flat_numpy[start:end] = W_train[:, :, i].reshape(-1, 1)
-
-            sigma_a, _ = np.meshgrid(sigma_a_train[:, i], t)
-            sigma_b, _ = np.meshgrid(sigma_b_train[:, i], t)
-            sigma_c, _ = np.meshgrid(sigma_c_train[:, i], t)
-            sigma_d, _ = np.meshgrid(sigma_d_train[:, i], t)
-            sigma_a_flat = sigma_a.reshape(-1, 1)
-            sigma_b_flat = sigma_b.reshape(-1, 1)
-            sigma_c_flat = sigma_c.reshape(-1, 1)
-            sigma_d_flat = sigma_d.reshape(-1, 1)
-            experiment_feature = np.ones(sigma_a_flat.shape) * g_il_values[sampled_indices[i]]
-
-            X_i = np.hstack((
-                X, Y, T,
-                sigma_a_flat, sigma_b_flat, sigma_c_flat, sigma_d_flat,
-                experiment_feature,
-            ))
-            self.features_all_numpy[start:end, :] = X_i
-
-            # IC sampling
-            sigma_a_ic_, _ = np.meshgrid(sigma_a_ic[:, i], t[:ic_time_steps])
-            sigma_b_ic_, _ = np.meshgrid(sigma_b_ic[:, i], t[:ic_time_steps])
-            sigma_c_ic_, _ = np.meshgrid(sigma_c_ic[:, i], t[:ic_time_steps])
-            sigma_d_ic_, _ = np.meshgrid(sigma_d_ic[:, i], t[:ic_time_steps])
-            sigma_a_ic_flat = sigma_a_ic_.reshape(-1, 1)
-            sigma_b_ic_flat = sigma_b_ic_.reshape(-1, 1)
-            sigma_c_ic_flat = sigma_c_ic_.reshape(-1, 1)
-            sigma_d_ic_flat = sigma_d_ic_.reshape(-1, 1)
-            experiment_feature_ic = np.ones(sigma_a_ic_flat.shape) * g_il_values[sampled_indices[i]]
-            start_ic = i * (x_ic.shape[0] * t[:ic_time_steps].shape[0])
-            end_ic = (i + 1) * (x_ic.shape[0] * t[:ic_time_steps].shape[0])
-            self.features_ic_all_numpy[start_ic:end_ic, :] = np.hstack((
-                X_ic, Y_ic, T_ic,
-                sigma_a_ic_flat, sigma_b_ic_flat, sigma_c_ic_flat, sigma_d_ic_flat,
-                experiment_feature_ic,
-            ))
-            self.V_ic_all_numpy[start_ic:end_ic] = vm_train[:ic_time_steps, ::ic_space_slice, i].reshape(-1, 1)
-            self.W_ic_all_numpy[start_ic:end_ic] = W_train[:ic_time_steps, ::ic_space_slice, i].reshape(-1, 1)
-
-        # -----------------
-        # Random sampling for PDE/BC/IC sets
-        # -----------------
-        idx_colocation = np.random.choice(self.features_collocation.shape[0], self.num_domain, replace=False)
-        X_collocation_numpy = self.features_collocation[idx_colocation]
-        self.X_collocation_train = torch.tensor(self.features_collocation,dtype=torch.float32)#torch.tensor(X_collocation_numpy, dtype=torch.float32, device=self.device)
-        #Using loader
-        self.collocation_dataset = self.collocation_dataset_class(self.X_collocation_train, self.device)
-        self.collocation_dataloader = DataLoader(
-            self.collocation_dataset,
-            batch_size=self.num_domain,
-            shuffle=True,
-            num_workers=12,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-        
-
-        idx_boundary = np.random.choice(self.features_boundary_all.shape[0], self.num_boundary, replace=False)
-        self.X_boundary = torch.tensor(self.features_boundary_all[idx_boundary], dtype=torch.float32, device=self.device)
-        self.X_normals = torch.tensor(self.X_normals_all[idx_boundary], dtype=torch.float32, device=self.device)
-
-        idx_ic = np.random.choice(self.features_ic_all_numpy.shape[0], self.num_init, replace=False)
-        self.X_ic_train = torch.tensor(self.features_ic_all_numpy[idx_ic], dtype=torch.float32, device=self.device)
-        self.V_ic_train = torch.tensor(self.V_ic_all_numpy[idx_ic], dtype=torch.float32, device=self.device)
-        self.W_ic_train = torch.tensor(self.W_ic_all_numpy[idx_ic], dtype=torch.float32, device=self.device)
-
-        # -----------------
-        # Data 
-        # -----------------
-        self.X_data_train_cpu = torch.tensor(self.features_all_numpy, dtype=torch.float32)
-        self.V_data_train_cpu = torch.tensor(self.v_flat_numpy, dtype=torch.float32)
-        self.W_data_train_cpu = torch.tensor(self.W_flat_numpy, dtype=torch.float32)
-
-        self.dataset = self.dataset_class(self.X_data_train_cpu, self.V_data_train_cpu, self.W_data_train_cpu, self.device)
-        self.dataloader = DataLoader(
-            self.dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=12,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-        num_batches = len(self.dataloader)
-        print(f"Training data: {len(self.dataset)} samples, {num_batches} batches of size {batch_size}")
-        #save number of batches to config
-        self.config["DATA"]["loader"]["num_batches"] = num_batches
-
-        self.X_test = torch.tensor(features_test_numpy, dtype=torch.float32, device=self.device)
-        self.V_test = torch.tensor(V_test, dtype=torch.float32, device=self.device)
-        self.W_test = torch.tensor(W_test, dtype=torch.float32, device=self.device)
-
-        # -----------------
-        # Min/Max over training data 
-        # -----------------
-        maxes_numpy = self.features_all_numpy.max(axis=0)
-        mins_numpy = self.features_all_numpy.min(axis=0)
-        self.maxes = torch.tensor(maxes_numpy, dtype=torch.float32, device=self.device)
-        self.mins = torch.tensor(mins_numpy, dtype=torch.float32, device=self.device)
-
-
 
     def get_minmax_tensors(self) -> Tuple[torch.Tensor, torch.Tensor]:
         assert self.mins is not None and self.maxes is not None, "Call setup_data() first."
@@ -1037,8 +611,38 @@ class ScarPINNDataModule:
 
     @torch.no_grad()
     def resample(self):
-        """Resample collocation set """
+        """Draw a fresh boundary collocation batch for the BC loss."""
+        base = getattr(self, "_boundary_base", None)
+        if base is None:
+            raise RuntimeError("Call setup_data() before resample().")
 
-        idx_boundary = np.random.choice(self.features_boundary_all.shape[0], self.num_boundary, replace=False)
-        self.X_boundary = torch.tensor(self.features_boundary_all[idx_boundary], dtype=torch.float32, device=self.device)
-        self.X_normals = torch.tensor(self.X_normals_all[idx_boundary], dtype=torch.float32, device=self.device)
+        total_boundary = (
+            base["x"].shape[0] * base["t"].shape[0] * base["g_values"].shape[0]
+        )
+        idx_boundary = np.random.choice(total_boundary, self.num_boundary, replace=False)
+        X_boundary_numpy, X_normals_numpy = build_boundary_batch(idx_boundary, **base)
+
+        self.X_boundary = torch.tensor(
+            X_boundary_numpy, dtype=torch.float32, device=self.device
+        )
+        self.X_normals = torch.tensor(
+            X_normals_numpy, dtype=torch.float32, device=self.device
+        )
+
+
+def iter_case_data_modules(config, cases=None, *, device=None):
+    """Yield initialized modules one case at a time, without mutating config.
+
+    Example: for dm in iter_case_data_modules(cfg, ["case_1", "case_2"]): ...
+    Keeping every yielded module also retains every case's selected FEM arrays.
+    """
+    names = resolve_cases(config, cases=cases)
+    paths = [resolve_dataset_path(config, name).resolve() for name in names]
+    if len(set(paths)) != len(paths):
+        raise ValueError("Multiple cases must resolve to different HDF5 files")
+    for case in names:
+        selected = deepcopy(config)
+        selected.setdefault("DATA", {})["case"] = case
+        module = ScarPINNDataModule(selected, case=case, device=device)
+        module.setup_data()
+        yield module
