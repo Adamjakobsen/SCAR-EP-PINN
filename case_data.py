@@ -1,51 +1,27 @@
-# case_data.py
-"""Single point of access to one geometry's HDF5 dataset.
-
-Everything the PINN and FiberNet need for a given case comes from
-``data/scar_ep_<case>.h5``, built by ``build_dataset.py`` (fields, mesh) and
-``boundary_normals.py`` (boundary points and normals).
-
-Three point sets are used, each with the marker and fibre that belong to it:
-
-    data points        mesh vertices          -- Vm / W targets live here.
-                                                 No fibre needed.
-    collocation points triangle centroids     -- exact triangle fibres/tags
-                                                 for FiberNet training/audits.
-    boundary points    boundary edge centroids -- exact adjacent-element
-                                                  fibres/tags for audits.
-
-The physics residual uses the learned FiberNet field; these exact fibre arrays
-are reference data, not a claim that its conductivity field is exact.
-
-Coordinates are stored in um and converted to mm on load, matching the
-``um_to_mm`` convention the rest of the pipeline uses.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Any, Optional
 
 import h5py
 import numpy as np
 
-DEFAULT_DATASET_TEMPLATE = "./data/scar_ep_{case}.h5"
+SUPPORTED_CASES = ("case_1", "case_2", "case_3")
 DEFAULT_CASE = "case_1"
 XY_MICRO_TO_MILLI = 1e-3
 SCAR_TAG = 3
 
 
 def resolve_case(config: dict, case: Optional[str] = None) -> str:
-    """Case name from an explicit override, else ``DATA.case``, else the default."""
-    name = str(case if case is not None else config.get("DATA", {}).get("case") or DEFAULT_CASE)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
-        raise ValueError(f"Invalid case name: {name!r}")
+    name = case if case is not None else config.get("DATA", {}).get("case") or DEFAULT_CASE
+    if name not in SUPPORTED_CASES:
+        raise ValueError(f"Unknown case {name!r}; choose from {', '.join(SUPPORTED_CASES)}")
     return name
 
 
 def resolve_cases(config: dict, *, case=None, cases=None) -> list[str]:
-    """Resolve one or several separate cases; never silently pool geometries."""
+    """Return the selected cases in order."""
     if case is not None and cases is not None:
         raise ValueError("Choose case or cases, not both")
     if case is not None:
@@ -65,7 +41,6 @@ def resolve_cases(config: dict, *, case=None, cases=None) -> list[str]:
 
 
 def fibernet_checkpoint_path(config: dict, case: str) -> Path:
-    """Use a case-specific checkpoint, with no shared single-geometry fallback."""
     name = resolve_case(config, case)
     template = str(config.get("DATA", {}).get(
         "fibernet_checkpoint", "./experiments/fibernet/{case}/fibernet.pth"))
@@ -74,17 +49,13 @@ def fibernet_checkpoint_path(config: dict, case: str) -> Path:
     return Path(template.format(case=name))
 
 
-def resolve_dataset_path(config: dict, case: str) -> Path:
-    """Path to the case HDF5, from ``DATA.dataset`` with a ``{case}`` placeholder."""
-    template = str(
-        config.get("DATA", {}).get("dataset") or DEFAULT_DATASET_TEMPLATE
-    )
-    return Path(template.format(case=case))
+def case_dataset_path(case: str) -> Path:
+    return Path("data") / f"scar_ep_{case}.h5"
 
 
 @dataclass
 class CaseData:
-    """Geometry, point sets and simulation fields for one case."""
+    """Mesh and simulation metadata for one case."""
 
     case: str
     path: Path
@@ -152,7 +123,7 @@ def _unit(vectors: np.ndarray) -> np.ndarray:
 def load_case_data(
     case: str, path: str | Path, dtype: Any = np.float32
 ) -> CaseData:
-    """Read one case file and derive the three point sets."""
+    """Load mesh metadata, converting coordinates from um to mm."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(
@@ -186,9 +157,7 @@ def load_case_data(
         time_ms = fh["time_ms"][:]
         dt_ms = float(fh.attrs["dt_ms"])
 
-    # A triangle centroid carries its own triangle's fibre and tag; a boundary
-    # edge centroid carries those of its one adjacent triangle. Both are exact,
-    # so no interpolation onto vertices is involved anywhere.
+    # Each centroid uses its triangle's fibre and tag.
     collocation_points = vertices[topology].mean(axis=1)
 
     return CaseData(
@@ -221,12 +190,7 @@ def load_field(
     slice_t: int = 1,
     dtype: Any = np.float32,
 ) -> np.ndarray:
-    """Read one field ("vm" or "w") as ``(n_sims, n_times, n_vertices)``.
-
-    Stored axis order is already (sim, time, vertex), so this is a contiguous
-    read per simulation and needs no transpose. Indexing in the datasets is
-    ``field[exp_idx, t_idx, x_idx]``.
-    """
+    """Read vm or w in (simulation, time, vertex) order."""
     sim_indices = np.asarray(sim_indices, dtype=np.int64)
     if sim_indices.size and np.any(np.diff(sim_indices) <= 0):
         raise ValueError("sim_indices must be strictly increasing for HDF5 reads")
@@ -240,7 +204,6 @@ def load_fields(
     slice_t: int = 1,
     dtype: Any = np.float32,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Read Vm and W together. Use load_field when only one is needed."""
     return (
         load_field(path, "vm", sim_indices, slice_t, dtype),
         load_field(path, "w", sim_indices, slice_t, dtype),
@@ -248,13 +211,12 @@ def load_fields(
 
 
 def load_case(config: dict, case: Optional[str] = None) -> CaseData:
-    """Convenience wrapper: resolve the case from config and load it."""
     name = resolve_case(config, case)
-    return load_case_data(name, resolve_dataset_path(config, name))
+    return load_case_data(name, case_dataset_path(name))
 
 
 def fibernet_training_arrays(data: CaseData):
-    """Original FiberNet input/target layout using the selected case's geometry."""
+    """Return centroid coordinates, fibre targets, and coordinate bounds."""
     X = np.concatenate((data.collocation_points, data.boundary_points), axis=0).astype(np.float32)
     y = np.concatenate((data.collocation_fibres, data.boundary_fibres), axis=0).astype(np.float32)
     y = y / np.clip(np.linalg.norm(y, axis=1, keepdims=True), 1e-8, None)

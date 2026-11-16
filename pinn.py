@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-from sigmanet import SigmaNet, setup_data
 
 class WaveAct(nn.Module):
     def __init__(self,omega_0,device):

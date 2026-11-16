@@ -1,31 +1,19 @@
-# ============================================
-# Project / runtime
-# ============================================
 PROJECT:
   path_directory: "./experiments/refactored_run"
   seed: 42
 
-# ============================================
-# Device and multi-GPU
-# ============================================
 DEVICE:
-  prefer: ["cuda", "mps", "cpu"]   # order of preference
+  prefer: ["cuda", "mps", "cpu"]
   multi_gpu: True                 # DataParallel only on CUDA
-  gpu_list: [0,1]                    # e.g., [0,1] on a 2-GPU node
+  gpu_list: [0,1]
 
-# ============================================
-# Trainer settings
-# ============================================
 TRAINER:
   train_from_checkpoint: False
   checkpoint: "/work/adam2/SCAR-EP-PINN/experiments/run_20250901_073322/model_data_epoch_5.pth"            
   phases: ["phase2" ]               # "phase1", "phase2", or "phase3"
   
-# ============================================
-# Model architecture & physics
-# ============================================
 MODEL:
-  in_features: 8                   # (x,y,t,sig_a,sig_b,sig_c,sig_d,g_il)
+  in_features: 8                   # old setting; PINN uses [x, y, t, g_il]
   out_features: 2                  # (v,w) 
   n_layers: 9
   n_neurons: 256
@@ -34,9 +22,8 @@ MODEL:
   activation: "tanh"
   activation_last: "silu"
 
-  scaler_eps: 1.0e-12              # min–max scaler epsilon (inside PINN)
+  scaler_eps: 1.0e-12
 
-  # Loss weights (read inside the model)
   loss_weights:
     w_pde: 0.01
     w_ode: 0.01
@@ -44,7 +31,6 @@ MODEL:
     w_ic:  1.0
     w_data: 1.0
 
-  # Physics constants (were in trainer.setup_data; move here and have the model own them)
   physics:
     a:   0.15
     k:   8.0
@@ -59,9 +45,6 @@ MODEL:
     vm_rest: -80.0      # mV
     vm_norm: 100.0  # mV
 
-# ============================================
-# Optimization & scheduling
-# ============================================
 OPTIM:
   phase1:                      # Data pretraining
     optimizer: "adam"
@@ -82,7 +65,7 @@ OPTIM:
       step_size: 2000
       gamma: 0.98
     clip_grad_norm: 1.0
-    epochs: 10
+    epochs: 5
 
   lbfgs:                       # PDE + Data (L-BFGS)
     lr: 0.1
@@ -100,21 +83,9 @@ OPTIM:
     adam_every_batches: 1000      # 0 disables; otherwise resample every N batches
     lbfgs_every_batches: 1000
 
-# ============================================
-# Data (paths, constants, sampling, loaders)
-# ============================================
 DATA:
-  # The same loader supports every case; each model/run keeps its own geometry.
   case: "case_1"
-  dataset: "./data/scar_ep_{case}.h5"
   fibernet_checkpoint: "./experiments/fibernet/{case}/fibernet.pth"
-  paths:
-    vm: "./data/vm_variation_scar_full.npy"
-    W: "./data/W_variation_scar_full.npy"
-    conductivities: "./data/conductivities_variation_scar_full.npy"
-    conductivities_boundary: "./data/conductivities_boundary_1.npy"
-    boundary_edge_centroids: "./data/boundary_edge_centroids.npy"
-    boundary_normals: "./data/boundary_normals.npy"
 
   geometry:
     extra: false
@@ -127,12 +98,11 @@ DATA:
     s_mtomm2_TU: 9.214285714285714   # 12.9/1.4
 
   sampling:
-    # Explicit list is the most robust
+    # Legacy sampling settings; the HDF5 loader reads g_il from the file.
     g_il_values: [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045,
                   0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.08, 0.085, 0.09, 0.095, 0.1]
 
-    # Use these if you want exact replication of the current hard-coded behavior
-    sampled_indices: null              # if provided, overrides the strategy
+    sampled_indices: null
     sampled_indices_strategy: "exclude_every_4_then_take_12"
     indices_collocation: [0,1, 3, 15, 16, 17, 18]
     indices_test: [-1]
@@ -146,25 +116,19 @@ DATA:
     ic_space_slice: 1
     ic_time_steps: 1
 
-    # Set sizes
     collocation_data: "all"
     num_domain: 100
     num_boundary: 100
-    #num_data: 10000
     num_init: 100
 
-  # DataLoader parameters
   loader:
-    batch_size: 4096 #4096
+    batch_size: 4096
     batch_size_lbfgs: 1000000
-    num_workers: 0  # vectorized whole-batch fetching; no worker IPC by default
+    num_workers: 0
     pin_memory: true
     prefetch_factor: 2
     shuffle_train: true
 
-# ============================================
-# Evaluation / Post-processing
-# ============================================
 EVAL:
   metrics:
     compute_mae: true

@@ -109,7 +109,7 @@ class PINNTrainer:
         ).to(self.device)
         checkpoint = fibernet_checkpoint_path(self.config, self.dm.case_data.case)
         state_dict = torch.load(checkpoint, map_location=self.device, weights_only=True)
-        # The frozen scaler is part of the selected geometry's data identity.
+        # Check the checkpoint's coordinate scaling against this case.
         for key in ("layer_norm.weight", "layer_norm.bias"):
             if key not in state_dict or not torch.equal(
                     state_dict[key].detach().cpu(), fibernet.state_dict()[key].detach().cpu()):
@@ -246,7 +246,7 @@ class PINNTrainer:
         RL1_best = float("inf")
         
         for epoch in range(n_epochs):
-            self.plot_frame(t_plot=430,epoch=epoch,phase="data")
+            
             epoch_loss = 0.0
             pbar = tqdm(self.dataloader, desc=f"Data Phase Epoch {epoch+1}/{n_epochs}", leave=False)
             for batch in pbar:
@@ -369,7 +369,7 @@ class PINNTrainer:
                          self.model.w_ode * ode_loss +
                          self.model.w_bc * bc_loss +
                          self.model.w_ic * (ic_v + ic_w) +
-                         self.model.w_data * (w_data*mse_v + mse_w))
+                         self.model.w_data * (mse_v + mse_w))
 
                 total.backward()
                 if self.clip_grad_norm > 0:
