@@ -23,3 +23,5 @@ export WORKON_HOME="$HOME/.virtualenvs/$ARCH"
 pipenv sync
 
 pipenv run python train_pinn.py --config config_multicase.yaml --case case_1
+
+echo "Job completed at $(date)"
