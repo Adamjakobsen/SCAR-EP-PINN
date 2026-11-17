@@ -318,6 +318,7 @@ class ScarPINNDataModule:
         self.num_init = cfgD["sampling"]["num_init"]
         ic_space_slice = cfgD["sampling"]["ic_space_slice"]
         ic_time_steps = cfgD["sampling"]["ic_time_steps"]
+        nx_test_slice = cfgD["sampling"]["nx_test_slice"]
 
         batch_size = cfgD["loader"]["batch_size"]
         self.batch_size_lbfgs = cfgD["loader"]["batch_size_lbfgs"]
@@ -351,10 +352,13 @@ class ScarPINNDataModule:
             f"experiments {np.round(g_train, 4).tolist()}"
         )
 
+        vm_train = vm_train[:, :, ::nx_test_slice]
+        W_train = W_train[:, :, ::nx_test_slice]
+
         t = time_axis(data.n_times, data.dt_ms, self.t_norm, slice_t)
 
-        x = vertices[:, 0]
-        y = vertices[:, 1]
+        x = vertices[::nx_test_slice, 0]
+        y = vertices[::nx_test_slice, 1]
 
         x_ic = x[::ic_space_slice]
         y_ic = y[::ic_space_slice]
@@ -411,7 +415,7 @@ class ScarPINNDataModule:
 
         self.dataloader = self._make_loader(self.dataset, batch_size, num_workers)
         num_batches = len(self.dataloader)
-        print(f"Training data: {len(self.dataset)} samples, {num_batches} batches of size {batch_size}")
+        print(f"Training data: {len(self.dataset)} samples, {num_batches} batches of size {batch_size}, {x.shape[0]} vertices, {t.shape[0]} time steps, {g_train.shape[0]} experiments")
         self.config["DATA"]["loader"]["num_batches"] = num_batches
 
         self.collocation_dataset = self.collocation_dataset_class(
