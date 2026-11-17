@@ -4,4 +4,5 @@
 *.pth
 
 experiments/*
+slurm_output/*
 .vscode
