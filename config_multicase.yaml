@@ -54,7 +54,7 @@ OPTIM:
       name: "StepLR"
       gamma: 0.98
       step_size: 4000
-    epochs: 5
+    epochs: 704 #5
 
   phase2:                      # PDE + Data (Adam)
     optimizer: "adam"
@@ -65,7 +65,7 @@ OPTIM:
       step_size: 2000
       gamma: 0.98
     clip_grad_norm: 1.0
-    epochs: 5
+    epochs: 0 #5
 
   lbfgs:                       # PDE + Data (L-BFGS)
     lr: 0.1
@@ -109,7 +109,7 @@ DATA:
 
     # Thinning in time/space
     slice_t: 1
-    nx_test_slice: 200
+    nx_test_slice: 724 #200
     nt_test_slice: 1
 
     # Initial condition grid
@@ -117,9 +117,9 @@ DATA:
     ic_time_steps: 1
 
     collocation_data: "all"
-    num_domain: 100
-    num_boundary: 100
-    num_init: 100
+    num_domain: 100 # Batch size for collocation points
+    num_boundary: 100 # Batch size for boundary points
+    num_init: 100 # Batch size for initial condition points
 
   loader:
     batch_size: 4096
