@@ -117,6 +117,8 @@ def training_experiment_indices(n_sims: int) -> np.ndarray:
     """Exclude every fourth sweep value and take the first 12 remaining values."""
     indices = np.arange(n_sims)
     return indices[(indices + 1) % 4 != 0][:N_TRAIN_EXPERIMENTS]
+    # indices = indices[4:]
+    # return indices[(indices - 3) % 4 != 0]
 
 
 def time_axis(n_times: int, dt_ms: float, t_norm: float, slice_t: int = 1) -> np.ndarray:
