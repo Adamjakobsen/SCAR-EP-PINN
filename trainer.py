@@ -242,13 +242,35 @@ class PINNTrainer:
     # Training phases
     # -------------------------------------------------------------------------
     def data_phase(self):
-        n_epochs = int(self.config["OPTIM"]["phase1"]["epochs"])
+        phase1_config = self.config["OPTIM"]["phase1"]
+        n_epochs = int(phase1_config["epochs"])
+        target_updates = phase1_config.get("updates")
+        if target_updates is not None:
+            target_updates = int(target_updates)
+            if target_updates <= 0:
+                raise ValueError("OPTIM.phase1.updates must be a positive integer")
+
+        steps_per_epoch = len(self.dataloader)
+        if steps_per_epoch <= 0:
+            raise ValueError("Phase 1 requires a non-empty data loader")
+        if target_updates is not None:
+            n_epochs = (target_updates + steps_per_epoch - 1) // steps_per_epoch
+        phase_updates = 0
         RL1_best = float("inf")
         
         for epoch in range(n_epochs):
             
             epoch_loss = 0.0
-            pbar = tqdm(self.dataloader, desc=f"Data Phase Epoch {epoch+1}/{n_epochs}", leave=False)
+            steps_this_epoch = steps_per_epoch
+            if target_updates is not None:
+                steps_this_epoch = min(steps_per_epoch, target_updates - phase_updates)
+            batches = itertools.islice(self.dataloader, steps_this_epoch)
+            pbar = tqdm(
+                batches,
+                total=steps_this_epoch,
+                desc=f"Data Phase Epoch {epoch+1}/{n_epochs}",
+                leave=False,
+            )
             for batch in pbar:
                 X_data = batch["X"].to(self.device)
                 V_data = batch["V"].to(self.device)
@@ -292,11 +314,12 @@ class PINNTrainer:
                 self.losses.append([self.iteration, mse_v.item(), mse_w.item(),
                                     rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
                 self.iteration += 1
+                phase_updates += 1
 
                 del X_data, V_data, W_data
 
                 
-            epoch_loss /= max(1, len(self.dataloader))
+            epoch_loss /= max(1, steps_this_epoch)
 
             rel_v, rel_w = self.model.eval_rel_l1(self.X_test, self.V_test, self.W_test)
             RL1_best = min(RL1_best, rel_v.item())
@@ -308,9 +331,27 @@ class PINNTrainer:
             torch.save(self.model.state_dict(), path)
             np.save(os.path.join(self.out_dir, "losses.npy"), self.losses)
             np.save(os.path.join(self.out_dir, "losses_test.npy"), self.losses_test)
+        print(f"[Data Phase] Completed {phase_updates} optimizer updates.")
 
     def adam_phase(self):
-        n_epochs = int(self.config["OPTIM"]["phase2"]["epochs"])
+        phase2_config = self.config["OPTIM"]["phase2"]
+        n_epochs = int(phase2_config["epochs"])
+        target_updates = phase2_config.get("updates")
+        if target_updates is not None:
+            target_updates = int(target_updates)
+            if target_updates <= 0:
+                raise ValueError("OPTIM.phase2.updates must be a positive integer")
+
+        steps_per_epoch = max(
+            len(self.dataloader),
+            len(self.collocation_dataloader),
+            len(self.boundary_dataloader),
+        )
+        if steps_per_epoch <= 0:
+            raise ValueError("Phase 2 requires non-empty data, collocation, and boundary loaders")
+        if target_updates is not None:
+            n_epochs = (target_updates + steps_per_epoch - 1) // steps_per_epoch
+        phase_updates = 0
   
         #Physics losses
 
@@ -320,20 +361,17 @@ class PINNTrainer:
         for epoch in range(n_epochs):
 
             epoch_loss_v = 0.0
-            
-            steps_per_epoch = max(
-                len(self.dataloader),
-                len(self.collocation_dataloader),
-                len(self.boundary_dataloader),
-            )
+            steps_this_epoch = steps_per_epoch
+            if target_updates is not None:
+                steps_this_epoch = min(steps_per_epoch, target_updates - phase_updates)
 
             data_iter = itertools.cycle(self.dataloader)
             collocation_iter = itertools.cycle(self.collocation_dataloader)
             boundary_iter = itertools.cycle(self.boundary_dataloader)
 
             pbar = tqdm(
-                range(steps_per_epoch),
-                total=steps_per_epoch,
+                range(steps_this_epoch),
+                total=steps_this_epoch,
                 desc=f"Adam Phase Epoch {epoch+1}/{n_epochs}",
                 leave=False,
             )
@@ -405,6 +443,7 @@ class PINNTrainer:
                                     rel_v.item(), rel_w.item(), mae_v.item(), mae_w.item()])
 
                 self.iteration += 1
+                phase_updates += 1
 
                 del X_data, V_data, W_data, X_collocation
                 
@@ -428,6 +467,7 @@ class PINNTrainer:
             np.save(os.path.join(self.out_dir, "losses.npy"), self.losses)
             np.save(os.path.join(self.out_dir, "losses_test.npy"), self.losses_test)
             np.save(os.path.join(self.out_dir, "losses_phys.npy"), self.losses_phys)
+        print(f"[Adam Phase] Completed {phase_updates} optimizer updates.")
         #run.finish()
         
 
@@ -436,12 +476,15 @@ class PINNTrainer:
 
     def train(self) -> None:
         self.setup_data()
+        phases = self.config["TRAINER"].get("phases", ["phase1", "phase2"])
 
-        print("\n=== [Phase 1: Data Pretraining] ===")
-        self.data_phase()
+        if "phase1" in phases:
+            print("\n=== [Phase 1: Data Pretraining] ===")
+            self.data_phase()
 
-        print("\n=== [Phase 2: PDE + Data Training (Adam)] ===")
-        self.adam_phase()
+        if "phase2" in phases:
+            print("\n=== [Phase 2: PDE + Data Training (Adam)] ===")
+            self.adam_phase()
 
 
     
@@ -466,6 +509,9 @@ class PINNTrainer:
             print("Loading previous physics losses from", os.path.join(checkpoint_dir, "losses_phys.npy"))
             self.losses_phys = np.load(os.path.join(checkpoint_dir, "losses_phys.npy")).tolist()
         self.setup_data()
+        if "phase1" in phases:
+            print("\n=== [Continuing Phase 1: Data Pretraining] ===")
+            self.data_phase()
         if "phase2" in phases:
             print("\n=== [Continuing Phase 2: PDE + Data Training (Adam)] ===")
             self.adam_phase()
