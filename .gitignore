@@ -2,6 +2,7 @@
 *.pyc
 *.npy
 *.pth
+*.mp4
 
 experiments/*
 .vscode
