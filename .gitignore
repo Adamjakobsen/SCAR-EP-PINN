@@ -5,4 +5,5 @@
 *.mp4
 
 experiments/*
+slurm_output/*
 .vscode
