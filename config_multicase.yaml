@@ -10,7 +10,7 @@ DEVICE:
 TRAINER:
   train_from_checkpoint: False
   checkpoint: "/work/adam2/SCAR-EP-PINN/experiments/run_20250901_073322/model_data_epoch_5.pth"            
-  phases: ["phase2" ]               # "phase1", "phase2", or "phase3"
+  phases: ["phase2"]                # Select ["phase1"], ["phase2"], or both phases
   
 MODEL:
   in_features: 8                   # old setting; PINN uses [x, y, t, g_il]
@@ -25,9 +25,9 @@ MODEL:
   scaler_eps: 1.0e-12
 
   loss_weights:
-    w_pde: 0.01
-    w_ode: 0.01
-    w_bc:  0.01
+    w_pde: 1.0 #0.01
+    w_ode: 1.0 #0.01
+    w_bc:  1.0 #0.01
     w_ic:  1.0
     w_data: 1.0
 
@@ -54,18 +54,20 @@ OPTIM:
       name: "StepLR"
       gamma: 0.98
       step_size: 4000
-    epochs: 704 #5
+    epochs: 235 # Used when updates is null
+    updates: 16667 # Exact number of Adam optimizer updates in phase 1
 
   phase2:                      # PDE + Data (Adam)
     optimizer: "adam"
-    lr: 1.0e-5
+    lr: 1.0e-4 #1.0e-5
     weight_decay: 0.0
     scheduler:
       name: "StepLR"
       step_size: 2000
       gamma: 0.98
     clip_grad_norm: 1.0
-    epochs: 0 #5
+    epochs: 2 #469 # Used when updates is null
+    updates: null #50000 #33333 # Exact number of Adam optimizer updates in phase 2
 
   lbfgs:                       # PDE + Data (L-BFGS)
     lr: 0.1
