@@ -344,7 +344,7 @@ class ScarPINNDataModule:
         sampled_indices = training_experiment_indices(len(g_il_values))
 
         g_train = g_il_values[sampled_indices]
-        g_collocation = g_il_values
+        # g_collocation = g_il_values
 
         # Field axes: experiment, time, vertex.
         vm_train, W_train = load_fields(dataset_path, sampled_indices, slice_t=slice_t)
@@ -425,7 +425,7 @@ class ScarPINNDataModule:
             y=y_inner,
             t=t,
             vmark=vmark_inner,
-            g_values=g_collocation,
+            g_values=g_train, #g_collocation,
             device=self.device,
         )
 
@@ -445,7 +445,7 @@ class ScarPINNDataModule:
             y=y_boundary,
             t=t,
             vmark=vmark_boundary,
-            g_values=g_collocation,
+            g_values=g_train, #g_collocation,
             normals=boundary_normals,
             device=self.device,
         )
@@ -456,7 +456,7 @@ class ScarPINNDataModule:
 
         print(f"Boundary data: {len(self.boundary_dataset)} samples, {len(self.boundary_dataloader)} batches of size {boundary_batch_size}")
 
-        total_boundary = x_boundary.shape[0] * t.shape[0] * g_collocation.shape[0]
+        total_boundary = x_boundary.shape[0] * t.shape[0] * g_train.shape[0] #g_collocation.shape[0]
         idx_boundary = np.random.choice(total_boundary, self.num_boundary, replace=False)
 
         X_boundary_numpy, X_normals_numpy = build_boundary_batch(
@@ -464,7 +464,7 @@ class ScarPINNDataModule:
             x=x_boundary,
             y=y_boundary,
             t=t,
-            g_values=g_collocation,
+            g_values=g_train, #g_collocation,
             vmark=vmark_boundary,
             normals=boundary_normals,
         )
@@ -499,7 +499,7 @@ class ScarPINNDataModule:
             x=x_boundary,
             y=y_boundary,
             t=t,
-            g_values=g_collocation,
+            g_values=g_train, #g_collocation,
             vmark=vmark_boundary,
             normals=boundary_normals,
         )
