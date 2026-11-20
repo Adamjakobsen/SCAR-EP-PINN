@@ -74,7 +74,7 @@ class PINN2D(nn.Module):
         self.s_git = 0.002#float(s.get("g_it", 0.002))
         self.s_gel = 1.0#float(s.get("g_el", 1.0))
         self.s_get = 1.0#float(s.get("g_et", 1.0))
-        self.kapa=12.9/1.4
+        self.kapa=12.9 #/1.4 #TODO: check with only 12.9
         
         
         if activation == "tanh":
@@ -297,16 +297,32 @@ class PINN2D(nn.Module):
         Jx = Sigma[:, 0, 0:1]*dV_dx + Sigma[:, 0, 1:2]*dV_dy
         Jy = Sigma[:, 1, 0:1]*dV_dx + Sigma[:, 1, 1:2]*dV_dy
 
-        dJx_dx, dJy_dy = torch.autograd.grad(
-            outputs=(Jx, Jy), inputs=(x_space, y_space),
-            grad_outputs=(torch.ones_like(Jx), torch.ones_like(Jy)),
-            create_graph=True, retain_graph=True
-        )
+        # dJx_dx, dJy_dy = torch.autograd.grad(
+        #     outputs=(Jx, Jy), inputs=(x_space, y_space),
+        #     grad_outputs=(torch.ones_like(Jx), torch.ones_like(Jy)),
+        #     create_graph=True, retain_graph=True
+        # )
+
+        dJx_dx = torch.autograd.grad(
+            Jx,
+            x_space,
+            grad_outputs=torch.ones_like(Jx),
+            create_graph=True,
+            retain_graph=True
+        )[0]
+
+        dJy_dy = torch.autograd.grad(
+            Jy,
+            y_space,
+            grad_outputs=torch.ones_like(Jy),
+            create_graph=True,
+            retain_graph=True
+        )[0]
 
         
         PDE = -dV_dt + (dJx_dx + dJy_dy) - self.k*v*(v - self.a)*(v - 1.0) - w*v
 
-        dW_dt = torch.autograd.grad(w, t_space, torch.ones_like(w), create_graph=False, retain_graph=True)[0]
+        dW_dt = torch.autograd.grad(w, t_space, torch.ones_like(w), create_graph=True, retain_graph=True)[0]
         ODE = dW_dt - (self.eps + (self.mu1*w)/(self.mu2 + v)) * (-w - self.k*v*(v - self.b - 1.0))
         return torch.mean(PDE**2), torch.mean(ODE**2)
 
