@@ -15,6 +15,7 @@ pyyaml = "*"
 tqdm = "*"
 matplotlib = "*"
 seaborn = "*"
+pyvista = {extras = ["jupyter"], version = "*"}
 
 [dev-packages]
 ipykernel = "*"
