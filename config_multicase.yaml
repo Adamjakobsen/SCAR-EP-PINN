@@ -58,7 +58,7 @@ OPTIM:
     updates: 16667 # Exact number of Adam optimizer updates in phase 1
 
   phase2:                      # PDE + Data (Adam)
-    optimizer: "soap"
+    optimizer: "adam"
     lr: 1.0e-4 #1.0e-5
     weight_decay: 0.0
     scheduler:
