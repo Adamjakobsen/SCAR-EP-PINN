@@ -12,6 +12,7 @@ from scar_data_module import ScarPINNDataModule, CustomDataset
 from fibernet import FiberNet
 from case_data import fibernet_training_arrays, fibernet_checkpoint_path
 import matplotlib.pyplot as plt
+from soap import SOAP
 
 
 class PINNTrainer:
@@ -49,11 +50,20 @@ class PINNTrainer:
             )
 
         o2 = config["OPTIM"]["phase2"]
-        self.optimizer_phase2 = optim.Adam(
-            self.model.parameters(),
-            lr=float(o2["lr"]),
-            weight_decay=float(o2["weight_decay"])
-        )
+        if o2['optimizer'] == "soap":
+            self.optimizer_phase2 = SOAP(params=self.model.parameters(),
+                                         lr = 3e-3,
+                                         betas=(.95, .95),
+                                         weight_decay=.01,
+                                         precondition_frequency=10)
+        elif o2['optimizer'] == "adam":
+            self.optimizer_phase2 = optim.Adam(
+                self.model.parameters(),
+                lr=float(o2["lr"]),
+                weight_decay=float(o2["weight_decay"])
+            )
+        else:
+            raise ValueError(f"Unsupported optimizer for phase 2: {o2['optimizer']}")
         self.scheduler_phase2 = None
         if o2.get("scheduler", {}).get("name") == "StepLR":
             self.scheduler_phase2 = optim.lr_scheduler.StepLR(
@@ -413,7 +423,8 @@ class PINNTrainer:
                 if self.clip_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad_norm)
                 self.optimizer_phase2.step()
-                self.scheduler_phase2.step()
+                if self.optimizer_phase2.__class__.__name__ == "ADAM": # Only update learning rate for Adam optimizer, not SOAP
+                    self.scheduler_phase2.step()
                 lr = self.scheduler_phase2.get_last_lr()[0]
 
                 with torch.no_grad():

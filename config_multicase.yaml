@@ -58,7 +58,7 @@ OPTIM:
     updates: 16667 # Exact number of Adam optimizer updates in phase 1
 
   phase2:                      # PDE + Data (Adam)
-    optimizer: "adam"
+    optimizer: "soap"
     lr: 1.0e-4 #1.0e-5
     weight_decay: 0.0
     scheduler:
@@ -67,7 +67,7 @@ OPTIM:
       gamma: 0.98
     clip_grad_norm: 1.0
     epochs: 2 #469 # Used when updates is null
-    updates: null #50000 #33333 # Exact number of Adam optimizer updates in phase 2
+    updates: 50000 #33333 # Exact number of Adam optimizer updates in phase 2
 
   lbfgs:                       # PDE + Data (L-BFGS)
     lr: 0.1
