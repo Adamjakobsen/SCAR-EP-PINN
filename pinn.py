@@ -172,7 +172,19 @@ class PINN2D(nn.Module):
         Mean square error for (V, W) vs. data.
         v_true is a real voltage in mV, so scale accordingly in the PINN.
         """
-        preds = self.forward(x_data)
+
+        x_space = x_data[:, 0:1].requires_grad_()
+        y_space = x_data[:, 1:2].requires_grad_()
+        t_space = x_data[:, 2:3].requires_grad_()
+        g_il = x_data[:, 3:4]
+        markers = x_data[:, 4:5]
+
+        for idx, marker in enumerate(markers):
+            if marker.item() == 0:
+                g_il[idx] = self.h_gil # Use healthy conductivity for healthy regions
+
+        preds = self.forward(torch.cat([x_space, y_space, t_space, g_il], dim=1))
+        # preds = self.forward(x_data)
         v_pred = preds[:, 0:1]
         w_pred = preds[:, 1:2]
         diff_v = v_pred - (v_true - self.vm_rest) / self.vm_norm
@@ -281,6 +293,11 @@ class PINN2D(nn.Module):
         markers = x_collocation[:, 4:5]
 
         g_il = x_collocation[:, 3:4]
+
+        for idx, marker in enumerate(markers):
+            if marker.item() == 0:
+                g_il[idx] = self.h_gil # Use healthy conductivity for healthy regions
+
         y_pred = self.forward(
                 torch.cat([x_space, y_space, t_space, g_il], dim=1)
             )
@@ -336,6 +353,11 @@ class PINN2D(nn.Module):
         tb = x_boundary[:, 2:3].requires_grad_()
         g_il = x_boundary[:, 3:4]
         markers = x_boundary[:, 4:5]
+
+        for idx, marker in enumerate(markers):
+            if marker.item() == 0:
+                g_il[idx] = self.h_gil # Use healthy conductivity for healthy regions
+
         fibers = fibernet(torch.cat([xb, yb], dim=1))  # (N, 2)
         ex, ey = fibers[:, 0:1], fibers[:, 1:2]
         v = self.forward(torch.cat([xb, yb, tb, g_il], dim=1))[:, 0:1]
@@ -357,7 +379,18 @@ class PINN2D(nn.Module):
         Initial condition: at t=0, V=V_ic, W=W_ic.
         x_ic shape [N, 8], v_ic_true, w_ic_true shape [N, 1].
         """
-        out = self.forward(x_ic)
+
+        x_space = x_ic[:, 0:1].requires_grad_()
+        y_space = x_ic[:, 1:2].requires_grad_()
+        t_space = x_ic[:, 2:3].requires_grad_()
+        g_il = x_ic[:, 3:4]
+        markers = x_ic[:, 4:5]
+
+        for idx, marker in enumerate(markers):
+            if marker.item() == 0:
+                g_il[idx] = self.h_gil # Use healthy conductivity for healthy regions
+
+        out = self.forward(torch.cat([x_space, y_space, t_space, g_il], dim=1))
         v_pred = out[:, 0:1]
         w_pred = out[:, 1:2]
         # scale real voltage
